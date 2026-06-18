@@ -57,59 +57,91 @@ class CameraManager:
     # ---- lifecycle --------------------------------------------------------
 
     def build(self):
-        """Create and start the pipeline. Raises CameraError on failure."""
-        cfg = self.cfg
+        """Create and start the pipeline. Raises CameraError on failure.
+
+        Built in named stages so a failure reports exactly which output the
+        OAK-D Lite rejected. The full three-stream config (preview + full-res
+        still + 1080p encode) is more than the single-output docs examples, so
+        if the device can't sustain it we fall back to a 2-stream config and,
+        last, a preview-only config rather than failing outright."""
+        stage = "create pipeline"
         try:
             pipeline = dai.Pipeline()
+            stage = "build Camera(CAM_A)"
             cam = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
 
-            # 1) Live preview (downscaled, interleaved BGR for OpenCV).
-            pw, ph = cfg.get("preview_size", [800, 480])
-            preview = cam.requestOutput(
-                size=(pw, ph),
-                type=dai.ImgFrame.Type.BGR888i,
-                fps=cfg.get("preview_fps", 25),
-            )
-            self._preview_q = _out_queue(preview, max_size=4)
+            stage = "preview requestOutput"
+            self._build_preview(cam)
+            print("[camera] preview output OK")
 
-            # 2) Full-resolution still through a trigger Script node.
-            full = cam.requestFullResolutionOutput(useHighestResolution=True)
-            script = pipeline.create(dai.node.Script)
-            # Don't let unconsumed full-res frames back-pressure the sensor.
+            stage = "video encoder"
             try:
-                script.inputs["in"].setBlocking(False)
-                script.inputs["in"].setMaxSize(1)
-            except Exception:
-                pass
-            full.link(script.inputs["in"])
-            script.setScript(_STILL_SCRIPT)
-            self._still_q = _out_queue(script.outputs["still"], max_size=2)
-            self._trigger_q = script.inputs["trigger"].createInputQueue()
+                self._build_encoder(cam, pipeline)
+                print("[camera] video encoder OK")
+            except Exception as exc:
+                print(f"[camera] encoder unavailable, video disabled: {exc}")
 
-            # 3) Continuous video encoder (host gates writing to disk).
-            vw, vh = cfg.get("video_size", [1920, 1080])
-            fps = cfg.get("video_fps", 30)
-            video = cam.requestOutput(
-                size=(vw, vh), type=dai.ImgFrame.Type.NV12, fps=fps
-            )
-            profile = (dai.VideoEncoderProperties.Profile.H265_MAIN
-                       if cfg.get("codec", "h265").lower() == "h265"
-                       else dai.VideoEncoderProperties.Profile.H264_MAIN)
-            encoder = pipeline.create(dai.node.VideoEncoder).build(
-                video, frameRate=fps, profile=profile
-            )
-            # A keyframe every second => recording starts quickly & cleanly.
+            stage = "full-res still"
             try:
-                encoder.setKeyframeFrequency(int(fps))
-            except Exception:
-                pass
-            self._encoded_q = _out_queue(encoder.out, max_size=int(fps) * 2)
+                self._build_still(cam, pipeline)
+                print("[camera] full-res still OK")
+            except Exception as exc:
+                print(f"[camera] full-res still unavailable, "
+                      f"stills disabled: {exc}")
 
+            stage = "pipeline start"
             pipeline.start()
             self.pipeline = pipeline
+            print("[camera] pipeline started")
         except Exception as exc:  # any DepthAI/XLink error during bring-up
             self.close()
-            raise CameraError(f"pipeline build failed: {exc}") from exc
+            raise CameraError(f"pipeline build failed at [{stage}]: {exc}") from exc
+
+    def _build_preview(self, cam):
+        """Preview output. Tries interleaved BGR, falls back to planar."""
+        pw, ph = self.cfg.get("preview_size", [800, 480])
+        fps = self.cfg.get("preview_fps", 25)
+        last = None
+        for t in (dai.ImgFrame.Type.BGR888i, dai.ImgFrame.Type.BGR888p):
+            try:
+                preview = cam.requestOutput(size=(pw, ph), type=t, fps=fps)
+                self._preview_q = _out_queue(preview, max_size=4)
+                return
+            except Exception as exc:
+                last = exc
+        raise last
+
+    def _build_encoder(self, cam, pipeline):
+        """Continuous video encoder (host gates writing to disk)."""
+        vw, vh = self.cfg.get("video_size", [1920, 1080])
+        fps = self.cfg.get("video_fps", 30)
+        video = cam.requestOutput(size=(vw, vh), type=dai.ImgFrame.Type.NV12, fps=fps)
+        profile = (dai.VideoEncoderProperties.Profile.H265_MAIN
+                   if self.cfg.get("codec", "h265").lower() == "h265"
+                   else dai.VideoEncoderProperties.Profile.H264_MAIN)
+        encoder = pipeline.create(dai.node.VideoEncoder).build(
+            video, frameRate=fps, profile=profile)
+        # A keyframe every second => recording starts quickly & cleanly.
+        try:
+            encoder.setKeyframeFrequency(int(fps))
+        except Exception:
+            pass
+        self._encoded_q = _out_queue(encoder.out, max_size=int(fps) * 2)
+
+    def _build_still(self, cam, pipeline):
+        """Full-resolution still through a trigger Script node."""
+        full = cam.requestFullResolutionOutput(useHighestResolution=True)
+        script = pipeline.create(dai.node.Script)
+        # Don't let unconsumed full-res frames back-pressure the sensor.
+        try:
+            script.inputs["in"].setBlocking(False)
+            script.inputs["in"].setMaxSize(1)
+        except Exception:
+            pass
+        full.link(script.inputs["in"])
+        script.setScript(_STILL_SCRIPT)
+        self._still_q = _out_queue(script.outputs["still"], max_size=2)
+        self._trigger_q = script.inputs["trigger"].createInputQueue()
 
     def is_alive(self):
         try:
@@ -144,8 +176,19 @@ class CameraManager:
             raise CameraError(f"preview read failed: {exc}") from exc
         return self._last_preview
 
+    # Capability flags so the UI/loop can skip disabled features.
+    @property
+    def has_stills(self):
+        return self._trigger_q is not None and self._still_q is not None
+
+    @property
+    def has_video(self):
+        return self._encoded_q is not None
+
     def trigger_still(self):
         """Ask the device to send back the latest full-resolution frame."""
+        if not self.has_stills:
+            return  # stills disabled (full-res output unavailable)
         try:
             self._trigger_q.send(dai.Buffer())
         except Exception as exc:
@@ -153,6 +196,8 @@ class CameraManager:
 
     def poll_still(self):
         """Return a full-res still as a BGR numpy array if one arrived, else None."""
+        if self._still_q is None:
+            return None
         try:
             frame = self._still_q.tryGet()
             return frame.getCvFrame() if frame is not None else None
@@ -161,6 +206,8 @@ class CameraManager:
 
     def poll_encoded(self):
         """Return a list of encoded frames available this loop (possibly empty)."""
+        if self._encoded_q is None:
+            return []
         try:
             return self._encoded_q.tryGetAll()
         except Exception as exc:

@@ -202,7 +202,9 @@ def main():
         # ---- process touch input ----------------------------------------
         for key in ui.take_events():
             if key == "photo":
-                if low_storage:
+                if not camera.has_stills:
+                    ui.toast("Stills unavailable on this device")
+                elif low_storage:
                     ui.toast("LOW STORAGE - not capturing")
                 else:
                     try:
@@ -210,7 +212,9 @@ def main():
                     except CameraError:
                         ui.toast("Capture failed")
             elif key == "record":
-                if recorder.active:
+                if not camera.has_video and not recorder.active:
+                    ui.toast("Video unavailable on this device")
+                elif recorder.active:
                     ui.toast("Saving clip...")
                     mp4 = recorder.stop()
                     ui.toast("Clip saved" if mp4 else "Saved raw (mux failed)")
