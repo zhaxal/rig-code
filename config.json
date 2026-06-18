@@ -5,11 +5,13 @@
 
   "save_root": "~/captures",
 
+  "_resolutions": "The OAK-D Lite RGB sensor runs ONE mode at a time; preview, video and photo all derive from it and share one fps (capture_fps). photo_size sets the sensor mode (largest output). 4K (3840x2160) runs at 30fps; the native 13MP (4208x3120) only runs slower, so if you set photo_size that high, also lower capture_fps (e.g. 10).",
+
   "preview_size": [800, 480],
-  "preview_fps": 25,
 
   "video_size": [1920, 1080],
-  "video_fps": 30,
+  "photo_size": [3840, 2160],
+  "capture_fps": 30,
   "codec": "h265",
 
   "photo_jpeg_quality": 95,

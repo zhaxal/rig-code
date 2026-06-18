@@ -48,9 +48,9 @@ DEFAULTS = {
     "note": "",
     "save_root": "~/captures",
     "preview_size": [800, 480],
-    "preview_fps": 25,
     "video_size": [1920, 1080],
-    "video_fps": 30,
+    "photo_size": [3840, 2160],  # photo/sensor mode; 4K runs at 30fps
+    "capture_fps": 30,           # one fps shared by all sensor outputs
     "codec": "h265",
     "photo_jpeg_quality": 95,
     "timelapse_interval_sec": 30,
@@ -286,38 +286,43 @@ def info_screen(w, h, lines):
 # --------------------------------------------------------------------------- #
 
 def build_pipeline(pipeline, cfg):
-    """Wire preview + (optional) encoder + (optional) full-res still.
-    Returns (preview_q, encoded_q, still_q, trigger_q); optional queues are None
-    if the device couldn't provide that stream."""
-    w, h = cfg["preview_size"]
+    """Wire preview + encoder + on-demand still, all from ONE sensor mode at one
+    fps so the OAK-D Lite's single RGB sensor can satisfy them together.
+    Returns (preview_q, encoded_q, still_q, trigger_q)."""
+    fps = int(cfg["capture_fps"])
+    pw, ph = cfg["preview_size"]
+    vw, vh = cfg["video_size"]
+    sw, sh = cfg["photo_size"]
     cam = pipeline.create(dai.node.Camera).build()  # no socket - proven to work
 
-    preview_q = cam.requestOutput((w, h), fps=cfg["preview_fps"]).createOutputQueue()
-    print("[camera] preview OK")
+    # All three outputs derive from the same sensor mode (sized by the largest,
+    # photo_size) at the same fps. requestOutput downscales/crops on-device.
+    preview_q = cam.requestOutput((pw, ph), fps=fps).createOutputQueue()
+    print(f"[camera] preview OK ({pw}x{ph}@{fps})")
 
     encoded_q = None
     try:
-        vw, vh = cfg["video_size"]
-        video = cam.requestOutput((vw, vh), type=dai.ImgFrame.Type.NV12,
-                                  fps=cfg["video_fps"])
+        video = cam.requestOutput((vw, vh), type=dai.ImgFrame.Type.NV12, fps=fps)
         profile = (dai.VideoEncoderProperties.Profile.H265_MAIN
                    if cfg["codec"].lower() == "h265"
                    else dai.VideoEncoderProperties.Profile.H264_MAIN)
         enc = pipeline.create(dai.node.VideoEncoder).build(
-            video, frameRate=cfg["video_fps"], profile=profile)
+            video, frameRate=fps, profile=profile)
         try:
-            enc.setKeyframeFrequency(int(cfg["video_fps"]))
+            enc.setKeyframeFrequency(fps)
         except Exception:
             pass
-        encoded_q = enc.out.createOutputQueue(maxSize=int(cfg["video_fps"]) * 2,
-                                              blocking=False)
-        print("[camera] encoder OK")
+        encoded_q = enc.out.createOutputQueue(maxSize=fps * 2, blocking=False)
+        print(f"[camera] encoder OK ({vw}x{vh}@{fps})")
     except Exception as exc:
         print(f"[camera] encoder unavailable, video disabled: {exc}")
 
+    # Still: an explicit high-res output (NOT requestFullResolutionOutput, which
+    # forces the slow 13MP mode and conflicts with 30fps video). Gated by the
+    # Script node so high-res frames only reach the host when triggered.
     still_q = trigger_q = None
     try:
-        full = cam.requestFullResolutionOutput(fps=2)  # on-demand only
+        full = cam.requestOutput((sw, sh), type=dai.ImgFrame.Type.NV12, fps=fps)
         script = pipeline.create(dai.node.Script)
         try:
             script.inputs["in"].setBlocking(False)
@@ -328,9 +333,9 @@ def build_pipeline(pipeline, cfg):
         script.setScript(STILL_SCRIPT)
         still_q = script.outputs["still"].createOutputQueue(maxSize=2, blocking=False)
         trigger_q = script.inputs["trigger"].createInputQueue()
-        print("[camera] still OK")
+        print(f"[camera] still OK ({sw}x{sh})")
     except Exception as exc:
-        print(f"[camera] full-res still unavailable, photos disabled: {exc}")
+        print(f"[camera] still unavailable, photos disabled: {exc}")
 
     return preview_q, encoded_q, still_q, trigger_q
 
@@ -370,7 +375,7 @@ def main():
         cv2.setWindowProperty(WINDOW, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
     cv2.setMouseCallback(WINDOW, ui.on_mouse)
 
-    rec = Recorder(session_dir, cfg["codec"].lower(), cfg["video_fps"])
+    rec = Recorder(session_dir, cfg["codec"].lower(), cfg["capture_fps"])
     photos = clips = 0
     timelapse = False
     next_tl = next_disk = 0.0
@@ -460,9 +465,11 @@ def main():
                 mp4 = rec.stop()
                 clips += 1 if mp4 else 0
                 ui.toast("Saved clip (camera lost)")
-            cv2.imshow(WINDOW, info_screen(w, h, ["CAMERA DISCONNECTED",
-                                                  "Check the OAK-D Lite cable / power.",
-                                                  "Reconnecting..."]))
+            # Show the real error so a config problem (e.g. "no available sensor
+            # for the resolution") is visible instead of looping silently.
+            msg = str(exc)[:60]
+            cv2.imshow(WINDOW, info_screen(w, h, ["CAMERA ERROR", msg,
+                                                  "Retrying... (q to quit)"]))
             if cv2.waitKey(2000) == ord("q"):
                 quit_app = True
 
