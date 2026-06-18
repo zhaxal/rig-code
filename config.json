@@ -19,5 +19,9 @@
   "timelapse_interval_sec": 30,
 
   "fullscreen": true,
-  "low_storage_mb": 500
+  "low_storage_mb": 500,
+
+  "_model_comment": "model_path: local NNArchive (.tar.xz) or blob, relative to this file. model: Luxonis model zoo ID (used only if model_path is empty).",
+  "model_path": "models/exp.rvc2.tar.xz",
+  "model": ""
 }

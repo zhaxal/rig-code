@@ -39,6 +39,7 @@ from datetime import datetime
 
 import cv2
 import depthai as dai
+import numpy as np
 
 WINDOW = "capture"
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -56,6 +57,9 @@ DEFAULTS = {
     "timelapse_interval_sec": 30,
     "fullscreen": True,
     "low_storage_mb": 500,
+    "model": "",           # model zoo ID, e.g. "yolov6-nano"; empty = disabled
+    "model_path": "",      # path to local NNArchive (.tar.xz) or blob; overrides "model"
+    "depth_enabled": False,
 }
 
 # On-device Script: keep the latest full-res frame, forward it to the host only
@@ -270,7 +274,6 @@ def _text(frame, s, org, color, scale):
 
 
 def info_screen(w, h, lines):
-    import numpy as np
     frame = np.zeros((h, w, 3), dtype="uint8")
     y = h // 2 - len(lines) * 16
     for ln in lines:
@@ -286,17 +289,15 @@ def info_screen(w, h, lines):
 # --------------------------------------------------------------------------- #
 
 def build_pipeline(pipeline, cfg):
-    """Wire preview + encoder + on-demand still, all from ONE sensor mode at one
-    fps so the OAK-D Lite's single RGB sensor can satisfy them together.
-    Returns (preview_q, encoded_q, still_q, trigger_q)."""
+    """Wire preview + encoder + on-demand still + optional model + optional depth.
+    Returns (preview_q, encoded_q, still_q, trigger_q, det_q, label_map, depth_q)."""
     fps = int(cfg["capture_fps"])
     pw, ph = cfg["preview_size"]
     vw, vh = cfg["video_size"]
     sw, sh = cfg["photo_size"]
     cam = pipeline.create(dai.node.Camera).build()  # no socket - proven to work
 
-    # All three outputs derive from the same sensor mode (sized by the largest,
-    # photo_size) at the same fps. requestOutput downscales/crops on-device.
+    # All outputs derive from the same sensor mode at the same fps.
     preview_q = cam.requestOutput((pw, ph), fps=fps).createOutputQueue()
     print(f"[camera] preview OK ({pw}x{ph}@{fps})")
 
@@ -317,9 +318,7 @@ def build_pipeline(pipeline, cfg):
     except Exception as exc:
         print(f"[camera] encoder unavailable, video disabled: {exc}")
 
-    # Still: an explicit high-res output (NOT requestFullResolutionOutput, which
-    # forces the slow 13MP mode and conflicts with 30fps video). Gated by the
-    # Script node so high-res frames only reach the host when triggered.
+    # Still: gated by Script so high-res frames only cross USB when triggered.
     still_q = trigger_q = None
     try:
         full = cam.requestOutput((sw, sh), type=dai.ImgFrame.Type.NV12, fps=fps)
@@ -337,7 +336,46 @@ def build_pipeline(pipeline, cfg):
     except Exception as exc:
         print(f"[camera] still unavailable, photos disabled: {exc}")
 
-    return preview_q, encoded_q, still_q, trigger_q
+    # Neural network model (runs on VPU).
+    det_q = None
+    label_map = []
+    model_path = cfg.get("model_path", "").strip()
+    model_name = cfg.get("model", "").strip()
+    if model_path or model_name:
+        try:
+            if model_path:
+                path = os.path.expanduser(model_path)
+                if not os.path.isabs(path):
+                    path = os.path.join(HERE, path)
+                model_desc = dai.NNArchive(path)
+                tag = os.path.basename(path)
+            else:
+                model_desc = dai.NNModelDescription(model_name)
+                tag = model_name
+            det_net = pipeline.create(dai.node.DetectionNetwork).build(cam, model_desc)
+            label_map = det_net.getClasses()
+            det_q = det_net.out.createOutputQueue(maxSize=4, blocking=False)
+            print(f"[camera] model OK ({tag}, {len(label_map)} classes)")
+        except Exception as exc:
+            print(f"[camera] model unavailable: {exc}")
+
+    # Stereo depth: left (CAM_B) + right (CAM_C) mono cameras → StereoDepth.
+    depth_q = None
+    if cfg.get("depth_enabled", False):
+        try:
+            mono_left = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
+            mono_right = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
+            stereo = pipeline.create(dai.node.StereoDepth)
+            mono_left.requestFullResolutionOutput().link(stereo.left)
+            mono_right.requestFullResolutionOutput().link(stereo.right)
+            stereo.setRectification(True)
+            stereo.setLeftRightCheck(True)
+            depth_q = stereo.disparity.createOutputQueue(maxSize=4, blocking=False)
+            print("[camera] stereo depth OK")
+        except Exception as exc:
+            print(f"[camera] stereo depth unavailable: {exc}")
+
+    return preview_q, encoded_q, still_q, trigger_q, det_q, label_map, depth_q
 
 
 # --------------------------------------------------------------------------- #
@@ -375,17 +413,23 @@ def main():
         cv2.setWindowProperty(WINDOW, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
     cv2.setMouseCallback(WINDOW, ui.on_mouse)
 
+    if cfg.get("depth_enabled", False):
+        cv2.namedWindow("depth", cv2.WINDOW_NORMAL)
+    _depth_cmap = cv2.applyColorMap(np.arange(256, dtype=np.uint8), cv2.COLORMAP_JET)
+    _depth_cmap[0] = [0, 0, 0]  # zero-disparity pixels stay black
+
     rec = Recorder(session_dir, cfg["codec"].lower(), cfg["capture_fps"])
     photos = clips = 0
     timelapse = False
     next_tl = next_disk = 0.0
     low_storage, fmb = False, None
+    current_detections = []
     quit_app = False
 
     while not quit_app:
         try:
             with dai.Pipeline() as pipeline:
-                pq, eq, sq, tq = build_pipeline(pipeline, cfg)
+                pq, eq, sq, tq, dq, labels, dpq = build_pipeline(pipeline, cfg)
                 pipeline.start()
                 print("[camera] pipeline started")
                 ui.toast("Camera ready", 2.0)
@@ -409,6 +453,21 @@ def main():
                                 ui.toast(f"Photo saved ({img.shape[1]}x{img.shape[0]})")
                             else:
                                 ui.toast("PHOTO SAVE FAILED")
+
+                    if dq is not None:
+                        det_msg = dq.tryGet()
+                        if det_msg is not None:
+                            current_detections = det_msg.detections
+
+                    if dpq is not None:
+                        disp_msg = dpq.tryGet()
+                        if disp_msg is not None:
+                            nd = disp_msg.getFrame()
+                            max_d = max(1, int(nd.max()))
+                            colored = cv2.applyColorMap(
+                                ((nd / max_d) * 255).astype(np.uint8), _depth_cmap
+                            )
+                            cv2.imshow("depth", colored)
 
                     now = time.monotonic()
                     if now >= next_disk:
@@ -449,6 +508,13 @@ def main():
                             ui.toast(f"Timelapse every {tl_interval}s" if timelapse else "Timelapse off")
                         elif key == "exit":
                             quit_app = True
+
+                    for det in current_detections:
+                        x1, y1 = int(det.xmin * w), int(det.ymin * h)
+                        x2, y2 = int(det.xmax * w), int(det.ymax * h)
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (70, 180, 70), 2)
+                        lbl = labels[det.label] if det.label < len(labels) else str(det.label)
+                        _text(frame, f"{lbl} {det.confidence:.0%}", (x1, max(y1 - 6, 14)), _GRN, 0.5)
 
                     ui.draw(frame, {"recording": rec.active, "rec_elapsed": rec.elapsed,
                                     "timelapse": timelapse, "photos": photos, "clips": clips,
