@@ -148,8 +148,8 @@ disconnect recovery.
 
 | File | Responsibility |
 |---|---|
-| `main.py` | Entry point, main loop, input handling, recovery |
-| `capture.py` | DepthAI v3 pipeline: preview, stills, video encoder |
+| `main.py` | Entry point, main loop, input handling, reconnect |
+| `camera.py` | DepthAI v3 pipeline: preview, stills, video encoder |
 | `storage.py` | Session folders, filenames, metadata, muxing, disk checks |
 | `ui.py` | Touch buttons and on-screen status overlays (OpenCV) |
 | `config.json` | User-editable settings |

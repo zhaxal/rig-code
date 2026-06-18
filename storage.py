@@ -9,8 +9,9 @@ Layout produced per launch:
         vid_YYYYMMDD_HHMMSS_mmm.mp4        recorded clips
         vid_YYYYMMDD_HHMMSS_mmm.h265       raw bitstream (kept until remuxed)
 
-Everything here is deliberately defensive: a greenhouse capture rig should
-never lose data or crash because of a full disk or a failed mux.
+Everything here is deliberately defensive: a greenhouse capture rig should never
+lose data or crash because of a full disk or a failed mux. None of it touches
+the camera, so it's plain Python and independently testable.
 """
 
 import json
@@ -22,7 +23,7 @@ from datetime import datetime
 
 
 def _timestamp(millis=False):
-    """Filesystem-safe timestamp. millis=True adds .mmm for unique filenames."""
+    """Filesystem-safe timestamp. millis=True adds _mmm for unique filenames."""
     now = datetime.now()
     if millis:
         return now.strftime("%Y%m%d_%H%M%S_") + f"{now.microsecond // 1000:03d}"
@@ -38,7 +39,6 @@ class SessionStorage:
         self.jpeg_quality = int(config.get("photo_jpeg_quality", 95))
         self.low_storage_mb = int(config.get("low_storage_mb", 500))
 
-        # Resolve and create the per-launch session folder.
         save_root = os.path.expanduser(config.get("save_root", "~/captures"))
         self.session_dir = os.path.join(save_root, _timestamp())
         os.makedirs(self.session_dir, exist_ok=True)
@@ -46,14 +46,13 @@ class SessionStorage:
         self.photo_count = 0
         self.video_count = 0
         self.started_at = datetime.now().isoformat(timespec="seconds")
-
         self._write_meta()
 
     # ---- metadata ---------------------------------------------------------
 
     def _write_meta(self):
-        """(Re)write session_meta.json. Called at start and after each capture
-        so the file on disk always reflects reality even if we crash later."""
+        """(Re)write session_meta.json atomically, at start and after each
+        capture, so the file on disk always reflects reality."""
         meta = {
             "session_started": self.started_at,
             "session_updated": datetime.now().isoformat(timespec="seconds"),
@@ -68,13 +67,12 @@ class SessionStorage:
             "photo_count": self.photo_count,
             "video_count": self.video_count,
         }
-        # Write to a temp file then rename so the JSON is never half-written.
         path = os.path.join(self.session_dir, "session_meta.json")
         tmp = path + ".tmp"
         try:
             with open(tmp, "w") as fh:
                 json.dump(meta, fh, indent=2)
-            os.replace(tmp, path)
+            os.replace(tmp, path)  # rename so the JSON is never half-written
         except OSError as exc:
             print(f"[storage] could not write session_meta.json: {exc}")
 
@@ -108,7 +106,7 @@ class SessionStorage:
         try:
             return shutil.disk_usage(self.session_dir).free / (1024 * 1024)
         except OSError:
-            return None  # unknown - treat as "don't block, but warn"
+            return None  # unknown - don't block, but the UI warns
 
     def low_storage(self):
         free = self.free_mb()
@@ -118,10 +116,10 @@ class SessionStorage:
 class VideoRecorder:
     """Writes the encoder's raw bitstream to disk, then remuxes to .mp4.
 
-    The encoder runs continuously in the DepthAI pipeline; this class only
-    decides *when* to write frames. Writing the raw bitstream straight to disk
-    (and flushing each batch) means a crash or power loss mid-recording still
-    leaves a recoverable file that we can mux on the next launch if needed.
+    The encoder runs continuously in the pipeline; this class only decides
+    *when* to write frames. Writing the raw bitstream straight to disk (and
+    flushing each batch) means a crash or power loss mid-recording still leaves
+    a recoverable file we can mux later.
     """
 
     def __init__(self, storage, fps):
@@ -150,12 +148,11 @@ class VideoRecorder:
             return False
         self.active = True
         self.started_at = time.monotonic()
-        # Wait for the first keyframe so the clip starts cleanly decodable.
-        self._keyframe_seen = False
+        self._keyframe_seen = False  # wait for first keyframe -> clean start
         return True
 
     def write(self, encoded_frames):
-        """Write a list of encoded frames (from CameraManager.poll_encoded())."""
+        """Write a list of encoded frames (from Streams.poll_encoded())."""
         if not self.active or self._fh is None:
             return
         try:
@@ -190,10 +187,9 @@ class VideoRecorder:
 
 
 def _is_keyframe(frame):
-    """True if this encoded frame is an I-frame (keyframe).
-
-    DepthAI v3 exposes EncodedFrame.getFrameType(); if that's unavailable we
-    accept every frame (the clip may start mid-GOP but stays playable)."""
+    """True if this encoded frame is an I-frame (keyframe). Falls back to True
+    if the API is unavailable, so a clip just starts mid-GOP but stays valid.
+    Imports depthai lazily so storage stays testable without the hardware."""
     try:
         import depthai as dai
         return frame.getFrameType() == dai.EncodedFrame.FrameType.I
@@ -202,27 +198,20 @@ def _is_keyframe(frame):
 
 
 def _remux_to_mp4(raw_path, mp4_path, fps):
-    """Wrap the raw H.264/H.265 elementary stream in an .mp4 container.
-
-    Uses stream copy (no re-encode) so it's fast and lossless. On success the
-    raw bitstream is deleted; on failure it is kept so nothing is lost."""
+    """Wrap the raw H.264/H.265 elementary stream in an .mp4 container with a
+    lossless stream copy. On success the raw bitstream is deleted; on failure it
+    is kept so nothing is lost."""
     if not raw_path or not os.path.exists(raw_path) or os.path.getsize(raw_path) == 0:
         print("[recorder] no data captured; nothing to mux")
         return None
-    cmd = [
-        "ffmpeg", "-y",
-        "-framerate", str(fps),
-        "-i", raw_path,
-        "-c", "copy",
-        mp4_path,
-    ]
+    cmd = ["ffmpeg", "-y", "-framerate", str(fps), "-i", raw_path,
+           "-c", "copy", mp4_path]
     try:
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL)
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         # FileNotFoundError => ffmpeg not installed. Keep the raw stream.
-        print(f"[recorder] ffmpeg remux failed ({exc}); keeping raw file "
-              f"{raw_path}")
+        print(f"[recorder] ffmpeg remux failed ({exc}); keeping raw {raw_path}")
         return None
     try:
         os.remove(raw_path)  # mux succeeded, raw no longer needed

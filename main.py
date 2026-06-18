@@ -2,10 +2,13 @@
 """
 main.py - Greenhouse photo/video capture app for Raspberry Pi 4 + OAK-D Lite.
 
-Single-threaded loop, touch-only, fullscreen. Its only job is to reliably
-capture and save media, so it favours simplicity and graceful recovery over
-features: a camera disconnect rebuilds the pipeline instead of crashing, an
-in-progress recording is always flushed to disk, and low storage is surfaced.
+Single-threaded, touch-only, fullscreen. Its only job is to reliably capture and
+save media, so it favours simplicity and graceful recovery over features.
+
+Structure mirrors the official DepthAI v3 examples: the whole session runs
+inside `with dai.Pipeline() as pipeline:` while `pipeline.isRunning()`. An outer
+loop re-enters that block to reconnect if the camera drops - leaving the `with`
+block always releases the device, so a rebuild never hits "no available sensor".
 
 Run:
     python3 main.py                 # uses config.json next to this file
@@ -22,8 +25,9 @@ import sys
 import time
 
 import cv2
+import depthai as dai
 
-from capture import CameraError, CameraManager
+from camera import build_pipeline
 from storage import SessionStorage, VideoRecorder
 from ui import TouchUI
 
@@ -67,7 +71,7 @@ def setup_window(fullscreen):
 
 
 def info_screen(width, height, lines):
-    """A simple black frame with centred text, for status/error displays."""
+    """A black frame with centred text, for status/error displays."""
     import numpy as np
     frame = np.zeros((height, width, 3), dtype=np.uint8)
     y = height // 2 - (len(lines) * 16)
@@ -78,6 +82,133 @@ def info_screen(width, height, lines):
                     cv2.LINE_AA)
         y += 40
     return frame
+
+
+class App:
+    """Holds the state that must survive a camera reconnect."""
+
+    def __init__(self, cfg, storage, ui):
+        self.cfg = cfg
+        self.storage = storage
+        self.ui = ui
+        self.width, self.height = cfg["preview_size"]
+        self.recorder = VideoRecorder(storage, cfg["video_fps"])
+        self.timelapse_on = False
+        self.timelapse_interval = max(1, int(cfg["timelapse_interval_sec"]))
+        self.next_timelapse = 0.0
+        self.next_storage_check = 0.0
+        self.low_storage = False
+        self.free_mb = None
+
+    # ---- one connected session -------------------------------------------
+
+    def run_session(self, pipeline, streams):
+        """Run the capture loop while the pipeline is alive.
+
+        Returns True if the user chose to quit, False if the camera dropped
+        (so the caller reconnects). Raises on a device error mid-loop, which
+        the caller also treats as "reconnect"."""
+        ui, storage, recorder = self.ui, self.storage, self.recorder
+        ui.toast("Camera ready", 2.0)
+
+        while pipeline.isRunning():
+            frame = streams.get_preview()
+            if frame is None:  # pipeline still warming up
+                if _q_pressed(15):
+                    return True
+                continue
+
+            # Drain the encoder every loop; write only while recording.
+            encoded = streams.poll_encoded()
+            if recorder.active:
+                recorder.write(encoded)
+
+            # Save any full-res still that arrived.
+            still = streams.poll_still()
+            if still is not None:
+                self._save_still(still)
+
+            now = time.monotonic()
+            if now >= self.next_storage_check:
+                self.next_storage_check = now + 5.0
+                self.free_mb = storage.free_mb()
+                self.low_storage = storage.low_storage()
+
+            if self.timelapse_on and now >= self.next_timelapse:
+                self.next_timelapse = now + self.timelapse_interval
+                if not self.low_storage:  # don't keep filling a near-full disk
+                    streams.trigger_still()
+
+            for key in ui.take_events():
+                if self._handle_event(key, streams, now):
+                    return True  # exit requested
+
+            ui.draw(frame, self._state())
+            cv2.imshow(WINDOW, frame)
+            if _q_pressed(1):  # keyboard escape hatch for developers
+                return True
+
+        return False  # pipeline stopped -> reconnect
+
+    def _save_still(self, still):
+        path = self.storage.new_photo_path()
+        ok = cv2.imwrite(path, still,
+                         [cv2.IMWRITE_JPEG_QUALITY, self.storage.jpeg_quality])
+        if ok:
+            self.storage.count_photo()
+            self.ui.flash()
+            self.ui.toast(f"Photo saved ({still.shape[1]}x{still.shape[0]})")
+        else:
+            self.ui.toast("PHOTO SAVE FAILED")
+
+    def _handle_event(self, key, streams, now):
+        """Act on a button press. Returns True if the app should exit."""
+        ui, recorder = self.ui, self.recorder
+        if key == "photo":
+            if not streams.has_stills:
+                ui.toast("Stills unavailable on this device")
+            elif self.low_storage:
+                ui.toast("LOW STORAGE - not capturing")
+            else:
+                streams.trigger_still()
+        elif key == "record":
+            if not streams.has_video and not recorder.active:
+                ui.toast("Video unavailable on this device")
+            elif recorder.active:
+                ui.toast("Saving clip...")
+                mp4 = recorder.stop()
+                ui.toast("Clip saved" if mp4 else "Saved raw (mux failed)")
+            elif self.low_storage:
+                ui.toast("LOW STORAGE - not recording")
+            elif recorder.start():
+                ui.toast("Recording")
+            else:
+                ui.toast("Could not start recording")
+        elif key == "timelapse":
+            self.timelapse_on = not self.timelapse_on
+            if self.timelapse_on:
+                self.next_timelapse = now  # fire immediately
+                ui.toast(f"Timelapse every {self.timelapse_interval}s")
+            else:
+                ui.toast("Timelapse off")
+        elif key == "exit":
+            return True
+        return False
+
+    def _state(self):
+        return {
+            "recording": self.recorder.active,
+            "rec_elapsed": self.recorder.elapsed,
+            "timelapse": self.timelapse_on,
+            "photo_count": self.storage.photo_count,
+            "video_count": self.storage.video_count,
+            "low_storage": self.low_storage,
+            "free_mb": self.free_mb,
+        }
+
+
+def _q_pressed(wait_ms):
+    return (cv2.waitKey(wait_ms) & 0xFF) == ord("q")
 
 
 def main():
@@ -95,167 +226,40 @@ def main():
         cfg["fullscreen"] = False
 
     width, height = cfg["preview_size"]
-
     storage = SessionStorage(cfg)
     print(f"[main] saving to {storage.session_dir}")
 
     ui = TouchUI(width, height)
     setup_window(cfg["fullscreen"])
     cv2.setMouseCallback(WINDOW, ui.on_mouse)
+    app = App(cfg, storage, ui)
 
-    camera = CameraManager(cfg)
-    recorder = VideoRecorder(storage, cfg["video_fps"])
-
-    timelapse_on = False
-    timelapse_interval = max(1, int(cfg["timelapse_interval_sec"]))
-    next_timelapse = 0.0
-    next_storage_check = 0.0
-    low_storage = False
-    free_mb = None
-    last_reconnect_attempt = 0.0
-
-    running = True
-    try:
-        camera.build()
-        ui.toast("Camera ready", 2.0)
-    except CameraError as exc:
-        print(f"[main] initial camera build failed: {exc}")
-
-    while running:
-        # ---- ensure the camera is up, rebuild if it dropped --------------
-        if not camera.is_alive():
-            if recorder.active:
-                # Flush whatever we recorded before losing the camera.
-                mp4 = recorder.stop()
+    quit_app = False
+    while not quit_app:
+        try:
+            # Whole session lives inside the pipeline context; leaving it (on
+            # exit OR error) always releases the device for a clean rebuild.
+            with dai.Pipeline() as pipeline:
+                streams = build_pipeline(pipeline, cfg)
+                pipeline.start()
+                print("[camera] pipeline started")
+                quit_app = app.run_session(pipeline, streams)
+        except Exception as exc:  # device dropped / bring-up failed
+            print(f"[main] camera error: {exc}")
+            if app.recorder.active:
+                mp4 = app.recorder.stop()  # flush whatever we recorded
                 ui.toast("Saved clip (camera lost)" if mp4 else "Clip recovered")
-            now = time.monotonic()
-            if now - last_reconnect_attempt > 2.0:
-                last_reconnect_attempt = now
-                camera.close()
-                try:
-                    camera.build()
-                    ui.toast("Camera reconnected", 2.0)
-                except CameraError as exc:
-                    print(f"[main] reconnect failed: {exc}")
             frame = info_screen(width, height,
                                 ["CAMERA DISCONNECTED",
                                  "Check the OAK-D Lite cable.",
                                  "Reconnecting..."])
             cv2.imshow(WINDOW, frame)
-            if (cv2.waitKey(200) & 0xFF) == ord("q"):
-                break
-            continue
+            if _q_pressed(2000):  # pause before retry; q to give up
+                quit_app = True
 
-        # ---- pull a preview frame ---------------------------------------
-        try:
-            frame = camera.get_preview()
-        except CameraError as exc:
-            print(f"[main] preview lost: {exc}")
-            continue  # loop back into the reconnect path above
-        if frame is None:
-            # No frame yet (pipeline still warming up); keep the UI responsive.
-            if (cv2.waitKey(15) & 0xFF) == ord("q"):
-                break
-            continue
-
-        # ---- service the encoder every loop -----------------------------
-        # Always drain the encoded queue; write it only while recording.
-        try:
-            encoded = camera.poll_encoded()
-        except CameraError:
-            encoded = []
-        if recorder.active:
-            recorder.write(encoded)
-
-        # ---- handle a captured still ------------------------------------
-        try:
-            still = camera.poll_still()
-        except CameraError:
-            still = None
-        if still is not None:
-            path = storage.new_photo_path()
-            ok = cv2.imwrite(path, still,
-                             [cv2.IMWRITE_JPEG_QUALITY, storage.jpeg_quality])
-            if ok:
-                storage.count_photo()
-                ui.flash()
-                ui.toast(f"Photo saved ({still.shape[1]}x{still.shape[0]})")
-            else:
-                ui.toast("PHOTO SAVE FAILED")
-
-        # ---- periodic disk-space check ----------------------------------
-        now = time.monotonic()
-        if now >= next_storage_check:
-            next_storage_check = now + 5.0
-            free_mb = storage.free_mb()
-            low_storage = storage.low_storage()
-
-        # ---- timelapse --------------------------------------------------
-        if timelapse_on and now >= next_timelapse:
-            next_timelapse = now + timelapse_interval
-            if not low_storage:  # don't keep filling a near-full disk
-                try:
-                    camera.trigger_still()
-                except CameraError:
-                    pass
-
-        # ---- process touch input ----------------------------------------
-        for key in ui.take_events():
-            if key == "photo":
-                if not camera.has_stills:
-                    ui.toast("Stills unavailable on this device")
-                elif low_storage:
-                    ui.toast("LOW STORAGE - not capturing")
-                else:
-                    try:
-                        camera.trigger_still()
-                    except CameraError:
-                        ui.toast("Capture failed")
-            elif key == "record":
-                if not camera.has_video and not recorder.active:
-                    ui.toast("Video unavailable on this device")
-                elif recorder.active:
-                    ui.toast("Saving clip...")
-                    mp4 = recorder.stop()
-                    ui.toast("Clip saved" if mp4 else "Saved raw (mux failed)")
-                elif low_storage:
-                    ui.toast("LOW STORAGE - not recording")
-                elif recorder.start():
-                    ui.toast("Recording")
-                else:
-                    ui.toast("Could not start recording")
-            elif key == "timelapse":
-                timelapse_on = not timelapse_on
-                if timelapse_on:
-                    next_timelapse = now  # fire immediately
-                    ui.toast(f"Timelapse every {timelapse_interval}s")
-                else:
-                    ui.toast("Timelapse off")
-            elif key == "exit":
-                running = False
-
-        # ---- draw & present ---------------------------------------------
-        state = {
-            "recording": recorder.active,
-            "rec_elapsed": recorder.elapsed,
-            "timelapse": timelapse_on,
-            "photo_count": storage.photo_count,
-            "video_count": storage.video_count,
-            "low_storage": low_storage,
-            "free_mb": free_mb,
-        }
-        ui.draw(frame, state)
-        cv2.imshow(WINDOW, frame)
-
-        # 'q' on an attached keyboard is a developer escape hatch.
-        if (cv2.waitKey(1) & 0xFF) == ord("q"):
-            running = False
-
-    # ---- clean shutdown -------------------------------------------------
     print("[main] shutting down")
-    if recorder.active:
-        recorder.stop()  # flush any in-progress recording
-    camera.close()
+    if app.recorder.active:
+        app.recorder.stop()  # flush any in-progress recording
     cv2.destroyAllWindows()
 
 

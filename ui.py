@@ -41,7 +41,6 @@ class TouchUI:
         self._toast = ""            # transient on-screen message
         self._toast_until = 0.0
 
-        # Four equal buttons across the bottom: Photo, Record, Timelapse, Exit.
         keys = [("photo", "PHOTO"), ("record", "REC"),
                 ("timelapse", "TIME-LAPSE"), ("exit", "EXIT")]
         bw = width // len(keys)
@@ -83,8 +82,7 @@ class TouchUI:
         """Overlay buttons + status onto frame (modified in place)."""
         now = time.monotonic()
 
-        # Capture flash: briefly blend the frame toward white.
-        if now < self._flash_until:
+        if now < self._flash_until:  # capture flash: blend toward white
             white = frame.copy()
             white[:] = 255
             cv2.addWeighted(frame, 0.4, white, 0.6, 0, frame)
@@ -97,12 +95,11 @@ class TouchUI:
     def _draw_topbar(self, frame, state):
         # Recording indicator + elapsed time (left).
         if state.get("recording"):
-            blink_on = int(time.monotonic() * 2) % 2 == 0
-            if blink_on:
+            if int(time.monotonic() * 2) % 2 == 0:  # blink
                 cv2.circle(frame, (24, 28), 12, _RED, -1)
             secs = int(state.get("rec_elapsed", 0))
-            txt = f"REC {secs // 60:02d}:{secs % 60:02d}"
-            _text(frame, txt, (44, 36), _RED, scale=0.8)
+            _text(frame, f"REC {secs // 60:02d}:{secs % 60:02d}", (44, 36),
+                  _RED, scale=0.8)
 
         # Capture count (right).
         count = f"Photos:{state.get('photo_count', 0)}  Clips:{state.get('video_count', 0)}"
@@ -121,7 +118,6 @@ class TouchUI:
 
     def _draw_buttons(self, frame, state):
         for btn in self.buttons:
-            # Highlight active toggles.
             active = ((btn.key == "record" and state.get("recording")) or
                       (btn.key == "timelapse" and state.get("timelapse")))
             fill = _RED if (btn.key == "record" and state.get("recording")) else (
