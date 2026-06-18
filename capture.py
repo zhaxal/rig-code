@@ -66,7 +66,12 @@ class CameraManager:
         last, a preview-only config rather than failing outright."""
         stage = "create pipeline"
         try:
-            pipeline = dai.Pipeline()
+            # Enter the pipeline's context just like tracker.py's
+            # `with dai.Pipeline() as pipeline:`. In DepthAI v3 the context
+            # owns the device connection/run-state; a bare pipeline can
+            # start() yet report isRunning() == False, which lands main.py in
+            # its "camera disconnected" reconnect loop.
+            pipeline = dai.Pipeline().__enter__()
             stage = "build Camera(CAM_A)"
             cam = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
 
@@ -153,8 +158,9 @@ class CameraManager:
         """Stop and release the pipeline; safe to call repeatedly."""
         if self.pipeline is not None:
             try:
-                self.pipeline.stop()
-                self.pipeline.wait()
+                # Mirror leaving the `with dai.Pipeline()` block: __exit__
+                # stops the pipeline and releases the device.
+                self.pipeline.__exit__(None, None, None)
             except Exception:
                 pass
         self.pipeline = None
