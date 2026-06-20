@@ -296,7 +296,7 @@ class CameraWorker(threading.Thread):
                     break
         print("[camera] worker stopped")
 
-    _STALE_TIMEOUT = 5.0  # no frames for this long -> force a pipeline rebuild
+    _STALE_TIMEOUT = 15.0  # no frames for this long -> force a pipeline rebuild
 
     def _loop(self, pipeline, pq, sq, labels):
         current_detections = []
