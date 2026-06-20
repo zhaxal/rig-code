@@ -226,15 +226,11 @@ class CameraWorker(threading.Thread):
             mono_left = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
             mono_right = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
             stereo = pipeline.create(dai.node.StereoDepth)
-            mono_left.requestOutput((640, 400), fps=self.fps).link(stereo.left)
-            mono_right.requestOutput((640, 400), fps=self.fps).link(stereo.right)
-            stereo.setRectification(True)
+            mono_left.requestOutput((640, 400)).link(stereo.left)
+            mono_right.requestOutput((640, 400)).link(stereo.right)
             stereo.setLeftRightCheck(True)
-            try:
-                stereo.setDefaultProfilePreset(
-                    dai.node.StereoDepth.PresetType.HIGH_DENSITY)
-            except Exception:
-                pass
+            stereo.setDefaultProfilePreset(
+                dai.node.StereoDepth.PresetMode.HIGH_DENSITY)
 
             if entry.kind == "archive":
                 model_desc = dai.NNArchive(entry.ref)
