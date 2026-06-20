@@ -226,8 +226,8 @@ class CameraWorker(threading.Thread):
             mono_left = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
             mono_right = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
             stereo = pipeline.create(dai.node.StereoDepth)
-            mono_left.requestOutput((640, 400)).link(stereo.left)
-            mono_right.requestOutput((640, 400)).link(stereo.right)
+            mono_left.requestOutput((640, 400), fps=self.fps).link(stereo.left)
+            mono_right.requestOutput((640, 400), fps=self.fps).link(stereo.right)
             stereo.setRectification(True)
             stereo.setLeftRightCheck(True)
             try:
@@ -318,6 +318,7 @@ class CameraWorker(threading.Thread):
                 continue
             last_frame = time.monotonic()
             frame = frame_msg.getCvFrame()
+            frame = cv2.rotate(frame, cv2.ROTATE_180)
             if frame.shape[1] != self.w or frame.shape[0] != self.h:
                 frame = cv2.resize(frame, (self.w, self.h))
 
