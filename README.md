@@ -1,132 +1,130 @@
-# Greenhouse Capture
+# Spatial Detector
 
-A touch-only photo, video, and AI inference app for a **Raspberry Pi 4** with a
-**Luxonis OAK-D Lite** camera and the **official 5-inch DSI touchscreen**, built for
-battery-powered use in a greenhouse.
+A **touchscreen GUI** for running **object-detection models with stereo spatial
+output** (X / Y / Z per object) on a **Raspberry Pi** with a **Luxonis OAK-D**
+camera. The interface is built with **tkinter** and designed for the Pi's DSI
+touchscreen — large touch buttons, no keyboard needed.
+
+Pick a detection model from an on-screen list and the DepthAI pipeline rebuilds
+on the fly, so you can compare models live. The OAK does all inference and depth
+on-device; the Pi just draws the preview and overlays.
 
 ## Features
 
-- **Live fullscreen RGB preview.**
-- **Photo** — captures a full-resolution still from the 13 MP sensor, saved as JPEG.
-- **Record** — toggles H.264/H.265 video via the OAK's hardware `VideoEncoder`,
-  remuxed to `.mp4`, with a blinking **REC** indicator and elapsed time.
-- **Time-lapse** — captures a still every *N* seconds for dataset building.
-- **Model inference** — runs any Luxonis NNArchive (`.tar.xz`) or model zoo model on
-  the VPU; bounding boxes and class labels overlaid on the preview in real time.
-  Drop models into `models/` and point `model_path` in `config.json`.
-- **Stereo depth** — optional colorized disparity map from the OAK-D Lite's left/right
-  mono cameras, displayed in a second window.
-- **Robustness** — camera-disconnect recovery, recording flush on loss/exit,
-  low-storage warning, and optional fullscreen-on-boot.
+- **Live RGB preview** in a fullscreen tkinter canvas.
+- **Spatial object detection** — bounding box, class, confidence, and **X/Y/Z in
+  metres** for every detection, via the OAK's `SpatialDetectionNetwork`
+  (stereo depth + neural net).
+- **Live model switching** — tap **MODEL** to choose any NNArchive in `models/`
+  or a Luxonis model-zoo ID; the pipeline rebuilds without restarting the app.
+- **Capture suite** — **PHOTO** (annotated JPEG), **REC** (annotated `.mp4`),
+  and **TIME-LAPSE** (a still every *N* seconds). Everything saves to a
+  timestamped session folder.
+- **Robust** — camera-disconnect recovery (it rebuilds and reconnects), a
+  low-storage warning, and a mock mode for testing the GUI without hardware.
 
 ## Hardware
 
 - Raspberry Pi 4 (Raspberry Pi OS **64-bit**)
-- Luxonis OAK-D Lite (connected by USB; use a USB3 port and a good cable)
-- Official Raspberry Pi 7" or 5" DSI touchscreen (default config assumes **800×480**)
+- Luxonis OAK-D / OAK-D Lite (USB3 port + a good cable)
+- Official Raspberry Pi DSI touchscreen (default config assumes **800×480**)
 
-## Install (Raspberry Pi OS 64-bit)
+## Install
 
 ```bash
-# 1. System packages
-sudo apt update
-sudo apt install -y python3-venv python3-pip ffmpeg
-
-# 2. udev rules so DepthAI can access the OAK over USB without sudo
-echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="03e7", MODE="0666"' | \
-  sudo tee /etc/udev/rules.d/80-movidius.rules
-sudo udevadm control --reload-rules && sudo udevadm trigger
-
-# 3. Project + Python deps
-cd ~/rig-code            # wherever you copied this project
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+cd ~/rig-code
+./setup.sh
 ```
 
-> `ffmpeg` is a **system** package (not pip). It is used to wrap the encoded
-> H.264/H.265 bitstream into an `.mp4` container. If it is missing, recordings are
-> still safe — the raw `.h264`/`.h265` stream is kept and can be muxed later.
+`setup.sh` installs the system packages (`python3-tk`, `python3-venv`, `ffmpeg`),
+adds a udev rule so DepthAI can reach the OAK over USB without `sudo`, creates a
+virtual environment, and installs the Python dependencies.
+
+> `python3-tk` provides tkinter and is an **apt** package, not a pip package —
+> that is why setup is done via the script rather than `pip install` alone.
 
 ## Run
 
 ```bash
 source venv/bin/activate
-python3 main.py                 # fullscreen, uses config.json
-python3 main.py --windowed      # windowed (useful when testing over VNC/HDMI)
-python3 main.py --note "row 5, morning"   # override the session note
+python3 app.py                 # fullscreen on the touchscreen
+python3 app.py --windowed      # windowed (useful over HDMI/VNC)
+python3 app.py --mock          # synthetic frames, no OAK needed (GUI test)
 ```
 
-Touch controls along the bottom bar: **PHOTO · REC/STOP · TIME-LAPSE · EXIT**.
-(An attached keyboard's **q** key also quits — handy during setup.)
-
-## Configuration
-
-Edit `config.json` (all fields optional; defaults are used if absent):
-
-| Field | Meaning | Default |
-|---|---|---|
-| `note` | Free-text note copied into every `session_meta.json` | `""` |
-| `save_root` | Where session folders are created | `~/captures` |
-| `preview_size` | Live preview / window size `[w, h]` | `[800, 480]` |
-| `video_size` | Recording resolution `[w, h]` | `[1920, 1080]` |
-| `photo_size` | Sensor mode / photo resolution `[w, h]` | `[3840, 2160]` |
-| `capture_fps` | Frame rate shared by all sensor outputs | `30` |
-| `codec` | `h265` (smaller) or `h264` (wider compatibility) | `h265` |
-| `photo_jpeg_quality` | JPEG quality 1–100 | `95` |
-| `timelapse_interval_sec` | Seconds between time-lapse stills | `30` |
-| `fullscreen` | Start fullscreen | `true` |
-| `low_storage_mb` | Warn / block captures below this free space (MB) | `500` |
-| `model_path` | Path to a local NNArchive (`.tar.xz`) or blob, relative to project root | `""` |
-| `model` | Luxonis model zoo ID (used only if `model_path` is empty) | `""` |
-| `depth_enabled` | Show colorized stereo depth in a second window | `false` |
+Touch bar along the bottom: **MODEL · PHOTO · REC/STOP · TIME-LAPSE · EXIT**.
+(`Esc` or `q` also quit — handy during setup.)
 
 ## Models
 
-Drop NNArchive files (`.tar.xz`) into the `models/` folder and set `model_path` in
-`config.json`:
+Drop NNArchive files (`*.tar.xz`, RVC2) into the `models/` folder. They appear
+automatically in the **MODEL** picker. To also offer Luxonis model-zoo models,
+list their IDs under `zoo_models` in `config.json`:
 
 ```json
-"model_path": "models/my_model.rvc2.tar.xz"
+"zoo_models": ["yolov6-nano", "mobilenet-ssd"]
 ```
 
-To use a Luxonis model zoo model instead, leave `model_path` empty and set `model`:
+Set `default_model` to the display name (a filename or a zoo ID) you want loaded
+at startup; leave it empty to use the first discovered model.
 
-```json
-"model_path": "",
-"model": "yolov6-nano"
-```
+A sample model, `models/exp.rvc2.tar.xz`, is included.
+
+## Configuration
+
+Edit `config.json` (all fields optional; defaults used if absent):
+
+| Field | Meaning | Default |
+|---|---|---|
+| `screen_size` | Touchscreen panel resolution `[w, h]` | `[800, 480]` |
+| `fullscreen` | Start fullscreen with the cursor hidden | `true` |
+| `capture_fps` | Frame rate shared by all OAK outputs | `30` |
+| `default_model` | Model display name to load at startup (empty = first) | `""` |
+| `zoo_models` | Extra Luxonis model-zoo IDs to offer in the picker | yolo/ssd |
+| `bb_scale` | Fraction of each bbox sampled for depth (0.5 = inner 50%) | `0.5` |
+| `depth_lower_mm` / `depth_upper_mm` | Clamp spatial depth range (mm) | `100` / `5000` |
+| `save_root` | Where session folders are created | `~/captures` |
+| `photo_jpeg_quality` | JPEG quality 1–100 | `95` |
+| `timelapse_interval_sec` | Seconds between time-lapse stills | `30` |
+| `low_storage_mb` | Warn / block captures below this free space (MB) | `500` |
+| `note` | Free-text note copied into `session_meta.json` | `""` |
 
 ## Where files are saved
 
 One timestamped folder per launch under `save_root`:
 
 ```
-~/captures/20260618_142530/
-├── session_meta.json                 # date, settings, note
-├── photo_20260618_142601_842.jpg     # full-resolution stills (13 MP)
-├── vid_20260618_142810_004.mp4       # recorded clips
+~/captures/20260620_142530/
+├── session_meta.json                 # date, note, settings
+├── photo_20260620_142601_842.jpg     # annotated stills
+├── vid_20260620_142810_004.mp4       # recorded clips
 └── ...
 ```
 
-If a recording's mux fails (e.g. `ffmpeg` missing) the raw `.h264`/`.h265`
-elementary stream is kept instead. Convert it later:
+## Project layout
 
-```bash
-ffmpeg -framerate 30 -i vid_XXXX.h265 -c copy vid_XXXX.mp4
-```
+| Path | Responsibility |
+|---|---|
+| `app.py` | tkinter UI: fullscreen window, video canvas, touch bar, model picker, render loop |
+| `camera.py` | `CameraWorker` thread: DepthAI pipeline, frame/detection grab, capture, live model rebuild, reconnect |
+| `overlay.py` | Draws detection boxes + X/Y/Z and the status HUD onto frames |
+| `recorder.py` | `Recorder` — writes annotated frames to `.mp4` |
+| `models.py` | Discovers local NNArchives + zoo IDs for the picker |
+| `config.py` | Defaults + `config.json` loading |
+| `setup.sh` | One-shot installer |
+| `models/` | NNArchive model files |
 
 ## Start on boot (optional)
 
 ```ini
-# ~/.config/systemd/user/capture.service
+# ~/.config/systemd/user/spatial-detector.service
 [Unit]
-Description=Greenhouse Capture
+Description=Spatial Detector
 After=graphical-session.target
 
 [Service]
 WorkingDirectory=%h/rig-code
-ExecStart=%h/rig-code/venv/bin/python %h/rig-code/main.py
+ExecStart=%h/rig-code/venv/bin/python %h/rig-code/app.py
 Restart=on-failure
 Environment=DISPLAY=:0
 
@@ -136,28 +134,21 @@ WantedBy=graphical-session.target
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable --now capture.service
+systemctl --user enable --now spatial-detector.service
 ```
-
-## Project layout
-
-| Path | Responsibility |
-|---|---|
-| `main.py` | App: pipeline, capture loop, recording, touch UI, reconnect |
-| `config.json` | User-editable settings |
-| `models/` | NNArchive / blob model files |
-| `requirements.txt` | Python dependencies |
 
 ## Troubleshooting
 
-- **Black screen / camera error on startup** — check the USB cable/port and the udev
-  rule above; the app retries automatically.
-- **Pipeline won't start** — the pipeline runs multiple sensor outputs simultaneously.
-  If the OAK-D Lite can't sustain your settings, lower `video_size` (e.g. `[1280, 720]`)
-  or `capture_fps` in `config.json`.
-- **Model not loading** — check the path in `model_path` is relative to the project
-  root, and that the file is a valid NNArchive or blob for RVC2.
-- **Recordings are `.h265` not `.mp4`** — install `ffmpeg` (`sudo apt install ffmpeg`).
-- **Preview too big/small** — set `preview_size` to your panel's resolution.
-- **Touch not registering** — confirm the DSI touchscreen works in the desktop;
-  taps are delivered as mouse events.
+- **Black screen / camera error on startup** — check the USB3 cable/port and the
+  udev rule; the worker retries and reconnects automatically.
+- **Model won't load** — confirm the file in `models/` is a valid RVC2 NNArchive,
+  or that the zoo ID is correct and the Pi has internet to download it.
+- **Pipeline won't start** — lower `capture_fps` or `screen_size` in `config.json`
+  if the OAK can't sustain your settings.
+- **No GUI / `ModuleNotFoundError: tkinter`** — run `sudo apt install python3-tk`
+  (it is a system package, re-run `./setup.sh`).
+- **OpenCV import or window errors** — depthai pulls in the headless OpenCV build;
+  `setup.sh` reinstalls `opencv-python` last so the full build wins. If a GTK error
+  persists, `sudo apt install -y libgtk-3-dev` and re-run setup.
+- **Touch not registering** — confirm the DSI touchscreen works on the desktop;
+  taps are delivered as mouse clicks to the tkinter buttons.
