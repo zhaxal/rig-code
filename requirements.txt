@@ -1,14 +1,17 @@
-# Python dependencies for the DepthAI v3 spatial detection example.
+# Python dependencies for the spatial detection touchscreen app.
 #
+# Install on Raspberry Pi OS 64-bit with ./setup.sh, or manually:
 #   python3 -m venv venv
 #   source venv/bin/activate
 #   pip install -r requirements.txt
 #
-# The model (yolov6-nano) is downloaded automatically from the Luxonis model
-# zoo on first run, so no local model files are needed.
+# NOTE: two non-pip system packages are also required (installed by setup.sh):
+#   - python3-tk : provides the tkinter GUI toolkit
+#   - ffmpeg     : optional, for re-muxing recordings if needed
 
 depthai>=3.0.0      # DepthAI v3 - OAK device API + SpatialDetectionNetwork
-numpy               # depth-frame math
+numpy               # frame handling
+pillow              # converts OpenCV frames to tkinter images (ImageTk)
 # opencv-python MUST be last: depthai pulls in opencv-python-headless,
-# so installing opencv-python after it ensures the full (GUI) build wins.
-opencv-python       # cv2.imshow display windows
+# so installing opencv-python after it ensures the full build wins.
+opencv-python       # frame drawing (boxes / overlay) + image saving
