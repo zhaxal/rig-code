@@ -14,7 +14,8 @@ DEFAULTS = {
     # --- Display --------------------------------------------------------
     "screen_size": [800, 480],   # DSI touchscreen resolution [w, h]
     "fullscreen": True,          # borderless fullscreen + hidden cursor
-    "capture_fps": 30,           # frame rate shared by all OAK outputs
+    "capture_fps": 20,           # sensor FPS shared by all OAK cameras (v3 stereo
+                                 # example uses 20; 30 on 3 streams overruns USB)
 
     # --- Model ----------------------------------------------------------
     # default_model: a display name from models.discover_models(). When empty,

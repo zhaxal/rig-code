@@ -217,20 +217,24 @@ class CameraWorker(threading.Thread):
         """
         import depthai as dai
 
-        cam = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
+        # Sensor FPS is set once, at build time, on each Camera node (the v3 way).
+        # Three streams at 30 fps overrun USB bandwidth -> "communication
+        # exception" / stalls; the official example runs the stereo path at 20.
+        cam = pipeline.create(dai.node.Camera).build(
+            dai.CameraBoardSocket.CAM_A, sensorFps=self.fps)
 
         spatial_q = None
         label_map = []
         entry = self._model
         if entry is not None:
-            mono_left = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
-            mono_right = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
+            mono_left = pipeline.create(dai.node.Camera).build(
+                dai.CameraBoardSocket.CAM_B, sensorFps=self.fps)
+            mono_right = pipeline.create(dai.node.Camera).build(
+                dai.CameraBoardSocket.CAM_C, sensorFps=self.fps)
             stereo = pipeline.create(dai.node.StereoDepth)
+            stereo.setExtendedDisparity(True)
             mono_left.requestOutput((640, 400)).link(stereo.left)
             mono_right.requestOutput((640, 400)).link(stereo.right)
-            stereo.setLeftRightCheck(True)
-            stereo.setDefaultProfilePreset(
-                dai.node.StereoDepth.PresetMode.DENSITY)
 
             if entry.kind == "archive":
                 model_desc = dai.NNArchive(entry.ref)
@@ -239,9 +243,9 @@ class CameraWorker(threading.Thread):
 
             # v3 SpatialDetectionNetwork.build wires depth itself: (rgb, stereo, model).
             spatial_net = (pipeline.create(dai.node.SpatialDetectionNetwork)
-                           .build(cam, stereo, model_desc, fps=self.fps))
+                           .build(cam, stereo, model_desc))
+            spatial_net.input.setBlocking(False)
             try:
-                spatial_net.setBoundingBoxScaleFactor(float(self.cfg["bb_scale"]))
                 spatial_net.setDepthLowerThreshold(int(self.cfg["depth_lower_mm"]))
                 spatial_net.setDepthUpperThreshold(int(self.cfg["depth_upper_mm"]))
             except Exception:
@@ -255,8 +259,7 @@ class CameraWorker(threading.Thread):
                   f"({entry.name}, {len(label_map)} classes)")
         else:
             preview_q = cam.requestOutput((self.w, self.h),
-                                          dai.ImgFrame.Type.BGR888p,
-                                          fps=self.fps).createOutputQueue()
+                                          dai.ImgFrame.Type.BGR888p).createOutputQueue()
             print(f"[camera] preview OK ({self.w}x{self.h}@{self.fps})")
 
         return preview_q, spatial_q, label_map
@@ -288,7 +291,10 @@ class CameraWorker(threading.Thread):
                 with self._lock:
                     self._loading = False
                 self._error_frame(str(exc)[:48])
-                if self._stop.wait(2.0):
+                # XLink / USB communication errors need the bus to fully reset
+                # before a reconnect will succeed — wait longer for those.
+                is_xlink = "XLink" in type(exc).__name__ or "communication" in str(exc).lower()
+                if self._stop.wait(10.0 if is_xlink else 5.0):
                     break
         print("[camera] worker stopped")
 
