@@ -230,7 +230,7 @@ class CameraWorker(threading.Thread):
             mono_right.requestOutput((640, 400)).link(stereo.right)
             stereo.setLeftRightCheck(True)
             stereo.setDefaultProfilePreset(
-                dai.node.StereoDepth.PresetMode.HIGH_DENSITY)
+                dai.node.StereoDepth.PresetMode.DENSITY)
 
             if entry.kind == "archive":
                 model_desc = dai.NNArchive(entry.ref)
