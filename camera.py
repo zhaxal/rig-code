@@ -91,6 +91,7 @@ class CameraWorker(threading.Thread):
 
         self.rec = Recorder(self.session_dir, self.fps, (self.w, self.h))
         self.timelapse = False
+        self._next_tl = 0.0  # next time-lapse capture time (monotonic)
         self.photos = 0
         self.clips = 0
         self.low_storage = False
@@ -193,6 +194,9 @@ class CameraWorker(threading.Thread):
         elif action == "timelapse":
             with self._lock:
                 self.timelapse = not self.timelapse
+            if self.timelapse:
+                # First still after one full interval, not immediately.
+                self._next_tl = time.monotonic() + self.tl_interval
             self._toast_msg(f"Timelapse every {self.tl_interval}s"
                             if self.timelapse else "Timelapse off")
         elif action == "switch":
@@ -204,13 +208,16 @@ class CameraWorker(threading.Thread):
 
     def _build_pipeline(self, pipeline):
         """Wire RGB preview + (if a model is set) stereo + SpatialDetectionNetwork.
-        Returns (preview_q, spatial_q, label_map)."""
+        Returns (preview_q, spatial_q, label_map).
+
+        When a model is active the displayed/recorded frame is the detection
+        network's *passthrough* (the exact frame the net ran on), so the overlay
+        boxes line up with the objects. Without a model we fall back to a plain
+        RGB camera output.
+        """
         import depthai as dai
 
-        cam = pipeline.create(dai.node.Camera).build()
-        preview_q = cam.requestOutput((self.w, self.h),
-                                      fps=self.fps).createOutputQueue()
-        print(f"[camera] preview OK ({self.w}x{self.h}@{self.fps})")
+        cam = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
 
         spatial_q = None
         label_map = []
@@ -219,8 +226,8 @@ class CameraWorker(threading.Thread):
             mono_left = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
             mono_right = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
             stereo = pipeline.create(dai.node.StereoDepth)
-            mono_left.requestFullResolutionOutput().link(stereo.left)
-            mono_right.requestFullResolutionOutput().link(stereo.right)
+            mono_left.requestOutput((640, 400)).link(stereo.left)
+            mono_right.requestOutput((640, 400)).link(stereo.right)
             stereo.setRectification(True)
             stereo.setLeftRightCheck(True)
             try:
@@ -234,9 +241,9 @@ class CameraWorker(threading.Thread):
             else:
                 model_desc = dai.NNModelDescription(entry.ref)
 
+            # v3 SpatialDetectionNetwork.build wires depth itself: (rgb, stereo, model).
             spatial_net = (pipeline.create(dai.node.SpatialDetectionNetwork)
-                           .build(cam, model_desc))
-            stereo.depth.link(spatial_net.inputDepth)
+                           .build(cam, stereo, model_desc, fps=self.fps))
             try:
                 spatial_net.setBoundingBoxScaleFactor(float(self.cfg["bb_scale"]))
                 spatial_net.setDepthLowerThreshold(int(self.cfg["depth_lower_mm"]))
@@ -245,9 +252,16 @@ class CameraWorker(threading.Thread):
                 pass
 
             spatial_q = spatial_net.out.createOutputQueue(maxSize=4, blocking=False)
+            preview_q = spatial_net.passthrough.createOutputQueue(maxSize=4,
+                                                                  blocking=False)
             label_map = spatial_net.getClasses() or []
             print(f"[camera] spatial detection OK "
                   f"({entry.name}, {len(label_map)} classes)")
+        else:
+            preview_q = cam.requestOutput((self.w, self.h),
+                                          dai.ImgFrame.Type.BGR888p,
+                                          fps=self.fps).createOutputQueue()
+            print(f"[camera] preview OK ({self.w}x{self.h}@{self.fps})")
 
         return preview_q, spatial_q, label_map
 
@@ -282,15 +296,28 @@ class CameraWorker(threading.Thread):
                     break
         print("[camera] worker stopped")
 
+    _STALE_TIMEOUT = 5.0  # no frames for this long -> force a pipeline rebuild
+
     def _loop(self, pipeline, pq, sq, labels):
         current_detections = []
         next_disk = 0.0
-        next_tl = 0.0
+        if self.timelapse:
+            self._next_tl = time.monotonic() + self.tl_interval
         ema = None
         last = time.monotonic()
+        last_frame = time.monotonic()
 
         while pipeline.isRunning() and not self._stop.is_set():
-            frame = pq.get().getCvFrame()
+            # Non-blocking grab so we stay responsive to stop/switch and can
+            # detect a stalled camera instead of hanging on a blocking get().
+            frame_msg = pq.tryGet()
+            if frame_msg is None:
+                if time.monotonic() - last_frame > self._STALE_TIMEOUT:
+                    raise RuntimeError("camera stalled (no frames)")
+                time.sleep(0.005)
+                continue
+            last_frame = time.monotonic()
+            frame = frame_msg.getCvFrame()
             if frame.shape[1] != self.w or frame.shape[0] != self.h:
                 frame = cv2.resize(frame, (self.w, self.h))
 
@@ -319,8 +346,8 @@ class CameraWorker(threading.Thread):
             if self.rec.active:
                 self.rec.write(frame)
 
-            if self.timelapse and now >= next_tl:
-                next_tl = now + self.tl_interval
+            if self.timelapse and now >= self._next_tl:
+                self._next_tl = now + self.tl_interval
                 if not self.low_storage:
                     self._save_photo(frame)
 
@@ -330,9 +357,6 @@ class CameraWorker(threading.Thread):
             hud_frame = frame.copy()
             draw_hud(hud_frame, self._hud_state())
             self._push(hud_frame)
-
-        if not pipeline.isRunning():
-            return
 
     def _drain_commands(self, clean_frame):
         switch = False
@@ -359,7 +383,7 @@ class CameraWorker(threading.Thread):
         with self._lock:
             self._model = self._desired_model
         t0 = time.monotonic()
-        next_disk = next_tl = 0.0
+        next_disk = 0.0
         while not self._stop.is_set():
             t = time.monotonic() - t0
             frame = np.full((self.h, self.w, 3), 30, dtype="uint8")
@@ -381,8 +405,8 @@ class CameraWorker(threading.Thread):
                                     and self.free_mb < self.low_mb)
             if self.rec.active:
                 self.rec.write(frame)
-            if self.timelapse and now >= next_tl:
-                next_tl = now + self.tl_interval
+            if self.timelapse and now >= self._next_tl:
+                self._next_tl = now + self.tl_interval
                 if not self.low_storage:
                     self._save_photo(frame)
 
