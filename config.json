@@ -1,26 +1,22 @@
 {
-  "_comment": "Edit this file to change capture settings. All fields are optional; sensible defaults are used if a field is missing or this file is absent.",
+  "_comment": "Settings for the spatial detection app. All fields are optional; defaults are used if a field is missing or this file is absent.",
 
-  "note": "greenhouse row 3, afternoon",
-
-  "save_root": "~/captures",
-
-  "preview_size": [800, 480],
+  "_display_comment": "screen_size is your touchscreen panel resolution [w, h]. fullscreen hides the cursor and fills the screen. capture_fps is shared by all OAK outputs.",
+  "screen_size": [800, 480],
+  "fullscreen": true,
   "capture_fps": 30,
 
-  "photo_jpeg_quality": 95,
-  "timelapse_interval_sec": 30,
-
-  "fullscreen": true,
-  "low_storage_mb": 500,
-
-  "_model_comment": "model_path: local NNArchive (.tar.xz) or blob, relative to this file. model: Luxonis model zoo ID (used only if model_path is empty). Both enable SpatialDetectionNetwork (AI + stereo depth → X/Y/Z per detection).",
-  "model_path": "models/exp.rvc2.tar.xz",
-  "model": "",
-
-  "_depth_comment": "depth_enabled shows the stereo disparity colourmap in a second window. depth_lower_mm / depth_upper_mm clamp the depth range used for spatial coordinates. bb_scale controls what fraction of each bounding box is sampled for depth (0.5 = inner 50%).",
-  "depth_enabled": false,
+  "_model_comment": "default_model is a display name shown in the GUI picker (e.g. a filename from models/ or a zoo id). Empty = first discovered model. zoo_models are extra Luxonis model-zoo ids offered alongside local NNArchives. bb_scale/depth thresholds tune spatial coordinate sampling.",
+  "default_model": "",
+  "zoo_models": ["yolov6-nano", "mobilenet-ssd"],
+  "bb_scale": 0.5,
   "depth_lower_mm": 100,
   "depth_upper_mm": 5000,
-  "bb_scale": 0.5
+
+  "_capture_comment": "Captures (photos, clips, time-lapse) save under save_root in a timestamped session folder. low_storage_mb warns and blocks captures below this free space.",
+  "save_root": "~/captures",
+  "photo_jpeg_quality": 95,
+  "timelapse_interval_sec": 30,
+  "low_storage_mb": 500,
+  "note": ""
 }

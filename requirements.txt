@@ -1,16 +1,17 @@
-# Python dependencies for the greenhouse capture app.
+# Python dependencies for the spatial detection touchscreen app.
 #
-# Install on Raspberry Pi OS 64-bit with:
+# Install on Raspberry Pi OS 64-bit with ./setup.sh, or manually:
 #   python3 -m venv venv
 #   source venv/bin/activate
 #   pip install -r requirements.txt
 #
-# NOTE: ffmpeg is also required but is a SYSTEM package, not a pip package:
-#   sudo apt install -y ffmpeg
-# It is used to remux the encoded H.264/H.265 bitstream into a .mp4 container.
+# NOTE: two non-pip system packages are also required (installed by setup.sh):
+#   - python3-tk : provides the tkinter GUI toolkit
+#   - ffmpeg     : optional, for re-muxing recordings if needed
 
-depthai>=3.0.0      # DepthAI v3 - OAK device API
-numpy               # Required by OpenCV / DepthAI frame handling
-# opencv-python MUST be last: depthai pulls in opencv-python-headless (no GUI),
-# so installing opencv-python after it ensures the GUI build wins.
-opencv-python       # Live preview window + drawn touch UI + image saving
+depthai>=3.0.0      # DepthAI v3 - OAK device API + SpatialDetectionNetwork
+numpy               # frame handling
+pillow              # converts OpenCV frames to tkinter images (ImageTk)
+# opencv-python MUST be last: depthai pulls in opencv-python-headless,
+# so installing opencv-python after it ensures the full build wins.
+opencv-python       # frame drawing (boxes / overlay) + image saving
