@@ -36,12 +36,13 @@ cd ~/rig-code
 ./setup.sh
 ```
 
-`setup.sh` installs the system packages (`python3-tk`, `python3-venv`, `ffmpeg`),
-adds a udev rule so DepthAI can reach the OAK over USB without `sudo`, creates a
-virtual environment, and installs the Python dependencies.
+`setup.sh` installs the system packages (`python3-tk`, `python3-pil.imagetk`,
+`python3-venv`, `ffmpeg`), adds a udev rule so DepthAI can reach the OAK over USB
+without `sudo`, creates a virtual environment, and installs the Python dependencies.
 
-> `python3-tk` provides tkinter and is an **apt** package, not a pip package —
-> that is why setup is done via the script rather than `pip install` alone.
+> `python3-tk` (tkinter) and `python3-pil.imagetk` (`PIL.ImageTk`) are **apt**
+> packages, not pip packages — that is why setup is done via the script rather than
+> `pip install` alone. Run the app from the venv (`source venv/bin/activate`).
 
 ## Run
 
@@ -147,6 +148,9 @@ systemctl --user enable --now spatial-detector.service
   if the OAK can't sustain your settings.
 - **No GUI / `ModuleNotFoundError: tkinter`** — run `sudo apt install python3-tk`
   (it is a system package, re-run `./setup.sh`).
+- **`cannot import name 'ImageTk' from 'PIL'`** — install the split-out Tk bridge
+  with `sudo apt install python3-pil.imagetk`, and make sure you're running inside
+  the venv (`source venv/bin/activate`). Re-running `./setup.sh` covers both.
 - **OpenCV import or window errors** — depthai pulls in the headless OpenCV build;
   `setup.sh` reinstalls `opencv-python` last so the full build wins. If a GTK error
   persists, `sudo apt install -y libgtk-3-dev` and re-run setup.

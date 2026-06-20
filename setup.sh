@@ -6,9 +6,11 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-echo "==> Installing system packages (tkinter, venv, ffmpeg)..."
+echo "==> Installing system packages (tkinter, Pillow-ImageTk, venv, ffmpeg)..."
 sudo apt update
-sudo apt install -y python3-venv python3-pip python3-tk ffmpeg
+# python3-pil.imagetk provides PIL.ImageTk, which is split out of the base
+# Pillow on Debian/Raspberry Pi OS and is needed to blit frames onto the canvas.
+sudo apt install -y python3-venv python3-pip python3-tk python3-pil.imagetk ffmpeg
 
 echo "==> Installing udev rule so DepthAI can reach the OAK over USB without sudo..."
 echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="03e7", MODE="0666"' | \
