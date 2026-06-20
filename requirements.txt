@@ -10,5 +10,7 @@
 # It is used to remux the encoded H.264/H.265 bitstream into a .mp4 container.
 
 depthai>=3.0.0      # DepthAI v3 - OAK device API
-opencv-python       # Live preview window + drawn touch UI + image saving
 numpy               # Required by OpenCV / DepthAI frame handling
+# opencv-python MUST be last: depthai pulls in opencv-python-headless (no GUI),
+# so installing opencv-python after it ensures the GUI build wins.
+opencv-python       # Live preview window + drawn touch UI + image saving

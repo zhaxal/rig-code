@@ -12,7 +12,8 @@ if [ ! -d "$SCRIPT_DIR/venv" ]; then
 fi
 source "$SCRIPT_DIR/venv/bin/activate"
 
-echo "==> Installing/reinstalling opencv-python with GUI support..."
+echo "==> Installing deps (depthai first, then opencv-python last to override headless)..."
+pip install depthai numpy
 pip uninstall opencv-python opencv-python-headless -y 2>/dev/null || true
 pip install opencv-python
 
@@ -24,8 +25,7 @@ print('yes' if 'GTK+:                        YES' in info or 'GTK3:' in info els
 ")
 
 if [ "$GTK_OK" = "yes" ]; then
-    echo "    GTK: YES - installing remaining deps..."
-    pip install depthai numpy
+    echo "    GTK: YES - GUI is working."
 else
     echo "    GTK not found in pip build. Falling back to system OpenCV..."
     pip uninstall opencv-python -y 2>/dev/null || true
