@@ -2,11 +2,24 @@
 """
 Greenhouse Capture - Raspberry Pi 4 + OAK-D Lite (DepthAI v3), single file.
 
-Pipeline:
-  - RGB preview  → live fullscreen view + photo/record captures.
-  - Mono L+R     → StereoDepth → SpatialDetectionNetwork (when model configured).
-  - Detections rendered with class, confidence, and X/Y/Z in metres.
-  - Photos and recordings capture the annotated frame (what you see = what you save).
+Built up from the official Luxonis camera example confirmed working on this
+device (https://docs.luxonis.com/software-v3/depthai/examples/camera/camera_output):
+the same `with dai.Pipeline()`, `cam.build()` (no socket), `requestOutput`,
+`pipeline.start()`, `while pipeline.isRunning()` core - with capture features
+layered on top.
+
+Features:
+  - Live fullscreen preview, touch UI.
+  - PHOTO  : full-resolution still (13 MP) via an on-device Script trigger, so
+             full-res frames only cross USB when you tap PHOTO.
+  - REC    : H.264/H.265 video via the OAK VideoEncoder, remuxed to .mp4.
+  - TIME-LAPSE : a still every N seconds.
+  - One session folder per launch, timestamped files, disk-space guard.
+  - Camera-disconnect recovery: the whole session runs inside the pipeline
+    context; leaving it (on error) releases the device for a clean rebuild.
+
+Each extra stream (encoder, full-res still) is optional: if the device can't
+provide it, that feature is disabled and the preview keeps running.
 
 Run:
     python3 main.py                 # fullscreen, uses config.json
@@ -19,6 +32,7 @@ Touch bar: PHOTO | REC/STOP | TIME-LAPSE | EXIT.   ('q' also quits.)
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -35,18 +49,31 @@ DEFAULTS = {
     "note": "",
     "save_root": "~/captures",
     "preview_size": [800, 480],
-    "capture_fps": 30,
+    "video_size": [1920, 1080],
+    "photo_size": [3840, 2160],  # photo/sensor mode; 4K runs at 30fps
+    "capture_fps": 30,           # one fps shared by all sensor outputs
+    "codec": "h265",
     "photo_jpeg_quality": 95,
     "timelapse_interval_sec": 30,
     "fullscreen": True,
     "low_storage_mb": 500,
-    "model": "",        # Luxonis model zoo ID, e.g. "yolov6-nano"; empty = disabled
-    "model_path": "",   # local NNArchive (.tar.xz) or blob; overrides "model"
-    "depth_enabled": False,   # show colorised depth in a second window
-    "depth_lower_mm": 100,    # ignore depth returns below this (mm)
-    "depth_upper_mm": 5000,   # ignore depth returns above this (mm)
-    "bb_scale": 0.5,          # fraction of bbox used for depth sampling
+    "model": "",           # model zoo ID, e.g. "yolov6-nano"; empty = disabled
+    "model_path": "",      # path to local NNArchive (.tar.xz) or blob; overrides "model"
+    "depth_enabled": False,
 }
+
+# On-device Script: keep the latest full-res frame, forward it to the host only
+# when a trigger arrives (so 13 MP frames don't stream over USB continuously).
+STILL_SCRIPT = """
+latest = None
+while True:
+    f = node.inputs['in'].tryGet()
+    if f is not None:
+        latest = f
+    trig = node.inputs['trigger'].tryGet()
+    if trig is not None and latest is not None:
+        node.io['still'].send(latest)
+"""
 
 
 # --------------------------------------------------------------------------- #
@@ -81,48 +108,84 @@ def free_mb(path):
         return None
 
 
+def is_keyframe(frame):
+    try:
+        return frame.getFrameType() == dai.EncodedFrame.FrameType.I
+    except Exception:
+        return True  # fall back: clip may start mid-GOP but stays valid
+
+
 # --------------------------------------------------------------------------- #
-# Video recorder: write annotated preview frames to .mp4 via cv2.VideoWriter.
+# Video recorder: write encoder bitstream to disk, then remux to .mp4.
 # --------------------------------------------------------------------------- #
 
 class Recorder:
-    def __init__(self, session_dir, fps, size):
+    def __init__(self, session_dir, codec, fps):
         self.session_dir = session_dir
+        self.ext = "h265" if codec == "h265" else "h264"
         self.fps = int(fps)
-        self.size = size  # (w, h)
         self.active = False
-        self._writer = None
-        self.mp4 = None
+        self._fh = None
+        self.raw = self.mp4 = None
         self.started = None
+        self._kf_seen = False
 
     @property
     def elapsed(self):
         return time.monotonic() - self.started if self.active and self.started else 0.0
 
     def start(self):
-        path = os.path.join(self.session_dir, f"vid_{stamp(millis=True)}.mp4")
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(path, fourcc, self.fps, self.size)
-        if not writer.isOpened():
+        base = os.path.join(self.session_dir, f"vid_{stamp(millis=True)}")
+        self.raw, self.mp4 = f"{base}.{self.ext}", f"{base}.mp4"
+        try:
+            self._fh = open(self.raw, "wb")
+        except OSError as exc:
+            print(f"[rec] cannot open {self.raw}: {exc}")
             return False
-        self._writer = writer
-        self.mp4 = path
-        self.active = True
-        self.started = time.monotonic()
+        self.active, self.started, self._kf_seen = True, time.monotonic(), False
         return True
 
-    def write(self, frame):
-        if self.active and self._writer:
-            self._writer.write(frame)
+    def write(self, frames):
+        if not self.active or self._fh is None:
+            return
+        try:
+            for fr in frames:
+                if not self._kf_seen:
+                    if is_keyframe(fr):
+                        self._kf_seen = True
+                    else:
+                        continue  # skip P-frames before the first keyframe
+                fr.getData().tofile(self._fh)
+            self._fh.flush()  # minimise loss on power-off
+        except (OSError, ValueError) as exc:
+            print(f"[rec] write error: {exc}")
 
     def stop(self):
+        """Close + remux. Returns mp4 path on success, else None."""
         if not self.active:
             return None
         self.active = False
-        if self._writer:
-            self._writer.release()
-            self._writer = None
-        return self.mp4 if self.mp4 and os.path.exists(self.mp4) else None
+        if self._fh:
+            try:
+                self._fh.close()
+            except OSError:
+                pass
+            self._fh = None
+        if not self.raw or not os.path.exists(self.raw) or os.path.getsize(self.raw) == 0:
+            return None
+        cmd = ["ffmpeg", "-y", "-framerate", str(self.fps), "-i", self.raw,
+               "-c", "copy", self.mp4]
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            print(f"[rec] ffmpeg remux failed ({exc}); keeping raw {self.raw}")
+            return None
+        try:
+            os.remove(self.raw)
+        except OSError:
+            pass
+        return self.mp4
 
 
 # --------------------------------------------------------------------------- #
@@ -130,7 +193,7 @@ class Recorder:
 # --------------------------------------------------------------------------- #
 
 _W, _BK, _RED, _GRN, _GRY, _AMB = ((255, 255, 255), (0, 0, 0), (40, 40, 220),
-                                    (70, 180, 70), (60, 60, 60), (40, 170, 230))
+                                   (70, 180, 70), (60, 60, 60), (40, 170, 230))
 
 
 class UI:
@@ -142,7 +205,7 @@ class UI:
         keys = [("photo", "PHOTO"), ("record", "REC"),
                 ("timelapse", "TIME-LAPSE"), ("exit", "EXIT")]
         bw = w // len(keys)
-        self.buttons = []
+        self.buttons = []  # (key, label, x1, x2)
         for i, (k, lbl) in enumerate(keys):
             x1 = i * bw
             x2 = w if i == len(keys) - 1 else (i + 1) * bw
@@ -167,7 +230,7 @@ class UI:
 
     def draw(self, frame, st):
         now = time.monotonic()
-        if now < self._flash_until:
+        if now < self._flash_until:  # capture flash
             white = frame.copy()
             white[:] = 255
             cv2.addWeighted(frame, 0.4, white, 0.6, 0, frame)
@@ -192,10 +255,11 @@ class UI:
             fill = _RED if (k == "record" and st["recording"]) else (_GRN if on else _GRY)
             cv2.rectangle(frame, (x1, self.h - BAR_H), (x2 - 2, self.h), fill, -1)
             cv2.rectangle(frame, (x1, self.h - BAR_H), (x2 - 2, self.h), _BK, 2)
-            label = "STOP" if k == "record" and st["recording"] else lbl
-            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
-            _text(frame, label, (x1 + (x2 - x1 - tw) // 2,
-                                 self.h - BAR_H + (BAR_H + th) // 2), _W, 0.8)
+            if k == "record" and st["recording"]:
+                lbl = "STOP"
+            (tw, th), _ = cv2.getTextSize(lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+            _text(frame, lbl, (x1 + (x2 - x1 - tw) // 2,
+                               self.h - BAR_H + (BAR_H + th) // 2), _W, 0.8)
 
         if now < self._toast_until and self._toast:
             (tw, th), _ = cv2.getTextSize(self._toast, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
@@ -221,78 +285,64 @@ def info_screen(w, h, lines):
 
 
 # --------------------------------------------------------------------------- #
-# Detection overlay
-# --------------------------------------------------------------------------- #
-
-def draw_detections(frame, detections, labels, w, h):
-    for det in detections:
-        x1 = int(det.xmin * w)
-        y1 = int(det.ymin * h)
-        x2 = int(det.xmax * w)
-        y2 = min(int(det.ymax * h), h - BAR_H - 2)
-        if x1 >= x2 or y1 >= y2:
-            continue
-
-        cv2.rectangle(frame, (x1, y1), (x2, y2), _GRN, 2)
-
-        lbl = labels[det.label] if det.label < len(labels) else str(det.label)
-        conf_text = f"{lbl} {det.confidence:.0%}"
-
-        try:
-            sc = det.spatialCoordinates
-            x_m = sc.x / 1000.0
-            y_m = sc.y / 1000.0
-            z_m = sc.z / 1000.0
-            coord_text = f"X:{x_m:+.2f} Y:{y_m:+.2f} Z:{z_m:.2f}m"
-        except AttributeError:
-            coord_text = None
-
-        ty = max(y1 - 6, 14)
-        _text(frame, conf_text, (x1, ty), _GRN, 0.5)
-        if coord_text:
-            _text(frame, coord_text, (x1, max(ty - 18, 14)), _AMB, 0.45)
-
-
-# --------------------------------------------------------------------------- #
-# Pipeline
+# Pipeline (built on the proven example: cam.build() with no socket)
 # --------------------------------------------------------------------------- #
 
 def build_pipeline(pipeline, cfg):
-    """Wire preview + optional SpatialDetectionNetwork (stereo + model).
-    Returns (preview_q, spatial_q, label_map, depth_q)."""
+    """Wire preview + encoder + on-demand still + optional model + optional depth.
+    Returns (preview_q, encoded_q, still_q, trigger_q, det_q, label_map, depth_q)."""
     fps = int(cfg["capture_fps"])
     pw, ph = cfg["preview_size"]
+    vw, vh = cfg["video_size"]
+    sw, sh = cfg["photo_size"]
+    cam = pipeline.create(dai.node.Camera).build()  # no socket - proven to work
 
-    cam = pipeline.create(dai.node.Camera).build()
+    # All outputs derive from the same sensor mode at the same fps.
     preview_q = cam.requestOutput((pw, ph), fps=fps).createOutputQueue()
     print(f"[camera] preview OK ({pw}x{ph}@{fps})")
 
-    spatial_q = depth_q = None
-    label_map = []
+    encoded_q = None
+    try:
+        video = cam.requestOutput((vw, vh), type=dai.ImgFrame.Type.NV12, fps=fps)
+        profile = (dai.VideoEncoderProperties.Profile.H265_MAIN
+                   if cfg["codec"].lower() == "h265"
+                   else dai.VideoEncoderProperties.Profile.H264_MAIN)
+        enc = pipeline.create(dai.node.VideoEncoder).build(
+            video, frameRate=fps, profile=profile)
+        try:
+            enc.setKeyframeFrequency(fps)
+        except Exception:
+            pass
+        encoded_q = enc.out.createOutputQueue(maxSize=fps * 2, blocking=False)
+        print(f"[camera] encoder OK ({vw}x{vh}@{fps})")
+    except Exception as exc:
+        print(f"[camera] encoder unavailable, video disabled: {exc}")
 
+    # Still: gated by Script so high-res frames only cross USB when triggered.
+    still_q = trigger_q = None
+    try:
+        full = cam.requestOutput((sw, sh), type=dai.ImgFrame.Type.NV12, fps=fps)
+        script = pipeline.create(dai.node.Script)
+        try:
+            script.inputs["in"].setBlocking(False)
+            script.inputs["in"].setMaxSize(1)
+        except Exception:
+            pass
+        full.link(script.inputs["in"])
+        script.setScript(STILL_SCRIPT)
+        still_q = script.outputs["still"].createOutputQueue(maxSize=2, blocking=False)
+        trigger_q = script.inputs["trigger"].createInputQueue()
+        print(f"[camera] still OK ({sw}x{sh})")
+    except Exception as exc:
+        print(f"[camera] still unavailable, photos disabled: {exc}")
+
+    # Neural network model (runs on VPU).
+    det_q = None
+    label_map = []
     model_path = cfg.get("model_path", "").strip()
     model_name = cfg.get("model", "").strip()
-
     if model_path or model_name:
         try:
-            # Stereo depth (required for spatial detection)
-            mono_left  = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
-            mono_right = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
-            stereo = pipeline.create(dai.node.StereoDepth)
-            mono_left.requestFullResolutionOutput().link(stereo.left)
-            mono_right.requestFullResolutionOutput().link(stereo.right)
-            stereo.setRectification(True)
-            stereo.setLeftRightCheck(True)
-            try:
-                stereo.setDefaultProfilePreset(
-                    dai.node.StereoDepth.PresetType.HIGH_DENSITY)
-            except Exception:
-                pass
-
-            if cfg.get("depth_enabled", False):
-                depth_q = stereo.disparity.createOutputQueue(maxSize=4, blocking=False)
-
-            # Model descriptor
             if model_path:
                 path = os.path.expanduser(model_path)
                 if not os.path.isabs(path):
@@ -302,27 +352,30 @@ def build_pipeline(pipeline, cfg):
             else:
                 model_desc = dai.NNModelDescription(model_name)
                 tag = model_name
-
-            # Spatial detection network
-            spatial_net = (pipeline.create(dai.node.SpatialDetectionNetwork)
-                           .build(cam, model_desc))
-            stereo.depth.link(spatial_net.inputDepth)
-
-            try:
-                spatial_net.setBoundingBoxScaleFactor(float(cfg.get("bb_scale", 0.5)))
-                spatial_net.setDepthLowerThreshold(int(cfg.get("depth_lower_mm", 100)))
-                spatial_net.setDepthUpperThreshold(int(cfg.get("depth_upper_mm", 5000)))
-            except Exception:
-                pass
-
-            spatial_q = spatial_net.out.createOutputQueue(maxSize=4, blocking=False)
-            label_map = spatial_net.getClasses()
-            print(f"[camera] spatial detection OK ({tag}, {len(label_map)} classes)")
-
+            det_net = pipeline.create(dai.node.DetectionNetwork).build(cam, model_desc)
+            label_map = det_net.getClasses()
+            det_q = det_net.out.createOutputQueue(maxSize=4, blocking=False)
+            print(f"[camera] model OK ({tag}, {len(label_map)} classes)")
         except Exception as exc:
-            print(f"[camera] spatial detection unavailable: {exc}")
+            print(f"[camera] model unavailable: {exc}")
 
-    return preview_q, spatial_q, label_map, depth_q
+    # Stereo depth: left (CAM_B) + right (CAM_C) mono cameras → StereoDepth.
+    depth_q = None
+    if cfg.get("depth_enabled", False):
+        try:
+            mono_left = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
+            mono_right = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
+            stereo = pipeline.create(dai.node.StereoDepth)
+            mono_left.requestFullResolutionOutput().link(stereo.left)
+            mono_right.requestFullResolutionOutput().link(stereo.right)
+            stereo.setRectification(True)
+            stereo.setLeftRightCheck(True)
+            depth_q = stereo.disparity.createOutputQueue(maxSize=4, blocking=False)
+            print("[camera] stereo depth OK")
+        except Exception as exc:
+            print(f"[camera] stereo depth unavailable: {exc}")
+
+    return preview_q, encoded_q, still_q, trigger_q, det_q, label_map, depth_q
 
 
 # --------------------------------------------------------------------------- #
@@ -365,7 +418,7 @@ def main():
     _depth_cmap = cv2.applyColorMap(np.arange(256, dtype=np.uint8), cv2.COLORMAP_JET)
     _depth_cmap[0] = [0, 0, 0]  # zero-disparity pixels stay black
 
-    rec = Recorder(session_dir, cfg["capture_fps"], (w, h))
+    rec = Recorder(session_dir, cfg["codec"].lower(), cfg["capture_fps"])
     photos = clips = 0
     timelapse = False
     next_tl = next_disk = 0.0
@@ -376,7 +429,7 @@ def main():
     while not quit_app:
         try:
             with dai.Pipeline() as pipeline:
-                pq, sq, labels, dq = build_pipeline(pipeline, cfg)
+                pq, eq, sq, tq, dq, labels, dpq = build_pipeline(pipeline, cfg)
                 pipeline.start()
                 print("[camera] pipeline started")
                 ui.toast("Camera ready", 2.0)
@@ -384,28 +437,37 @@ def main():
                 while pipeline.isRunning() and not quit_app:
                     frame = pq.get().getCvFrame()
 
-                    # Pull latest spatial detections (non-blocking; keep last if none)
-                    if sq is not None:
-                        msg = sq.tryGet()
-                        if msg is not None:
-                            current_detections = msg.detections
+                    if eq is not None:
+                        frames = eq.tryGetAll()
+                        if rec.active:
+                            rec.write(frames)
 
-                    # Optional depth colormap window
+                    if sq is not None:
+                        still = sq.tryGet()
+                        if still is not None:
+                            img = still.getCvFrame()
+                            path = os.path.join(session_dir, f"photo_{stamp(millis=True)}.jpg")
+                            if cv2.imwrite(path, img, [cv2.IMWRITE_JPEG_QUALITY, jpeg_q]):
+                                photos += 1
+                                ui.flash()
+                                ui.toast(f"Photo saved ({img.shape[1]}x{img.shape[0]})")
+                            else:
+                                ui.toast("PHOTO SAVE FAILED")
+
                     if dq is not None:
-                        disp_msg = dq.tryGet()
+                        det_msg = dq.tryGet()
+                        if det_msg is not None:
+                            current_detections = det_msg.detections
+
+                    if dpq is not None:
+                        disp_msg = dpq.tryGet()
                         if disp_msg is not None:
                             nd = disp_msg.getFrame()
                             max_d = max(1, int(nd.max()))
                             colored = cv2.applyColorMap(
-                                ((nd / max_d) * 255).astype(np.uint8), _depth_cmap)
+                                ((nd / max_d) * 255).astype(np.uint8), _depth_cmap
+                            )
                             cv2.imshow("depth", colored)
-
-                    # Draw detections (bounding box + label + X/Y/Z)
-                    draw_detections(frame, current_detections, labels, w, h)
-
-                    # Record annotated frame (no UI bar) — matches live view
-                    if rec.active:
-                        rec.write(frame)
 
                     now = time.monotonic()
                     if now >= next_disk:
@@ -415,32 +477,25 @@ def main():
 
                     if timelapse and now >= next_tl:
                         next_tl = now + tl_interval
-                        if not low_storage:
-                            path = os.path.join(session_dir,
-                                                f"photo_{stamp(millis=True)}.jpg")
-                            cv2.imwrite(path, frame, [cv2.IMWRITE_JPEG_QUALITY, jpeg_q])
-                            photos += 1
+                        if tq is not None and not low_storage:
+                            tq.send(dai.Buffer())
 
                     for key in ui.take_events():
                         if key == "photo":
-                            if low_storage:
+                            if tq is None:
+                                ui.toast("Stills unavailable on this device")
+                            elif low_storage:
                                 ui.toast("LOW STORAGE - not capturing")
                             else:
-                                path = os.path.join(session_dir,
-                                                    f"photo_{stamp(millis=True)}.jpg")
-                                if cv2.imwrite(path, frame,
-                                               [cv2.IMWRITE_JPEG_QUALITY, jpeg_q]):
-                                    photos += 1
-                                    ui.flash()
-                                    ui.toast(f"Photo saved ({w}x{h})")
-                                else:
-                                    ui.toast("PHOTO SAVE FAILED")
+                                tq.send(dai.Buffer())
                         elif key == "record":
-                            if rec.active:
+                            if eq is None and not rec.active:
+                                ui.toast("Video unavailable on this device")
+                            elif rec.active:
                                 ui.toast("Saving clip...")
                                 mp4 = rec.stop()
                                 clips += 1 if mp4 else 0
-                                ui.toast("Clip saved" if mp4 else "Save failed")
+                                ui.toast("Clip saved" if mp4 else "Saved raw (mux failed)")
                             elif low_storage:
                                 ui.toast("LOW STORAGE - not recording")
                             elif rec.start():
@@ -450,30 +505,37 @@ def main():
                         elif key == "timelapse":
                             timelapse = not timelapse
                             next_tl = now
-                            ui.toast(f"Timelapse every {tl_interval}s"
-                                     if timelapse else "Timelapse off")
+                            ui.toast(f"Timelapse every {tl_interval}s" if timelapse else "Timelapse off")
                         elif key == "exit":
                             quit_app = True
 
+                    for det in current_detections:
+                        x1, y1 = int(det.xmin * w), int(det.ymin * h)
+                        x2, y2 = int(det.xmax * w), int(det.ymax * h)
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (70, 180, 70), 2)
+                        lbl = labels[det.label] if det.label < len(labels) else str(det.label)
+                        _text(frame, f"{lbl} {det.confidence:.0%}", (x1, max(y1 - 6, 14)), _GRN, 0.5)
+
                     ui.draw(frame, {"recording": rec.active, "rec_elapsed": rec.elapsed,
-                                    "timelapse": timelapse, "photos": photos,
-                                    "clips": clips, "low_storage": low_storage,
-                                    "free_mb": fmb})
+                                    "timelapse": timelapse, "photos": photos, "clips": clips,
+                                    "low_storage": low_storage, "free_mb": fmb})
                     cv2.imshow(WINDOW, frame)
                     if cv2.waitKey(1) == ord("q"):
                         quit_app = True
 
-                pipeline.stop()
+                pipeline.stop()  # in case we left via quit_app
 
-        except Exception as exc:
+        except Exception as exc:  # device dropped / bring-up failed
             print(f"[main] camera error: {exc}")
             if rec.active:
                 mp4 = rec.stop()
                 clips += 1 if mp4 else 0
                 ui.toast("Saved clip (camera lost)")
+            # Show the real error so a config problem (e.g. "no available sensor
+            # for the resolution") is visible instead of looping silently.
             msg = str(exc)[:60]
             cv2.imshow(WINDOW, info_screen(w, h, ["CAMERA ERROR", msg,
-                                                   "Retrying... (q to quit)"]))
+                                                  "Retrying... (q to quit)"]))
             if cv2.waitKey(2000) == ord("q"):
                 quit_app = True
 

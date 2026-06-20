@@ -1,26 +1,27 @@
 {
-  "_comment": "Edit this file to change capture settings. All fields are optional; sensible defaults are used if a field is missing or this file is absent.",
+  "_comment": "Edit this file to change capture settings. All fields are optional; sensible defaults are used if a field is missing or this file is absent. The free-text 'note' is copied into every session's session_meta.json - set it before a session (e.g. on a laptop or via the Pi file manager) to describe the run.",
 
   "note": "greenhouse row 3, afternoon",
 
   "save_root": "~/captures",
 
+  "_resolutions": "The OAK-D Lite RGB sensor runs ONE mode at a time; preview, video and photo all derive from it and share one fps (capture_fps). photo_size sets the sensor mode (largest output). 4K (3840x2160) runs at 30fps; the native 13MP (4208x3120) only runs slower, so if you set photo_size that high, also lower capture_fps (e.g. 10).",
+
   "preview_size": [800, 480],
+
+  "video_size": [1920, 1080],
+  "photo_size": [3840, 2160],
   "capture_fps": 30,
+  "codec": "h265",
 
   "photo_jpeg_quality": 95,
+
   "timelapse_interval_sec": 30,
 
   "fullscreen": true,
   "low_storage_mb": 500,
 
-  "_model_comment": "model_path: local NNArchive (.tar.xz) or blob, relative to this file. model: Luxonis model zoo ID (used only if model_path is empty). Both enable SpatialDetectionNetwork (AI + stereo depth → X/Y/Z per detection).",
+  "_model_comment": "model_path: local NNArchive (.tar.xz) or blob, relative to this file. model: Luxonis model zoo ID (used only if model_path is empty).",
   "model_path": "models/exp.rvc2.tar.xz",
-  "model": "",
-
-  "_depth_comment": "depth_enabled shows the stereo disparity colourmap in a second window. depth_lower_mm / depth_upper_mm clamp the depth range used for spatial coordinates. bb_scale controls what fraction of each bounding box is sampled for depth (0.5 = inner 50%).",
-  "depth_enabled": false,
-  "depth_lower_mm": 100,
-  "depth_upper_mm": 5000,
-  "bb_scale": 0.5
+  "model": ""
 }
