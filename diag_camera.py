@@ -45,7 +45,11 @@ def stage_enumerate(dai):
         print("       sudo udevadm control --reload-rules && sudo udevadm trigger")
         return False
     for d in devices:
-        print(f"   found: {d.getMxId()}  state={d.state}  protocol={d.protocol}")
+        # v3 renamed getMxId() -> deviceId attribute; fall back gracefully.
+        dev_id = getattr(d, "deviceId", None) or getattr(d, "name", None) or repr(d)
+        state = getattr(d, "state", "?")
+        protocol = getattr(d, "protocol", "?")
+        print(f"   found: {dev_id}  state={state}  protocol={protocol}")
     print("   PASS")
     return True
 
