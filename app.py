@@ -10,7 +10,7 @@ Run:
     python3 app.py --windowed      # windowed (testing over HDMI/VNC)
     python3 app.py --mock          # synthetic frames, no OAK required
 
-Touch bar: MODEL | PHOTO | REC/STOP | TIME-LAPSE | DATASET | EXIT.  (Esc / q quit.)
+Touch bar: MODEL | PHOTO | REC/STOP | TIME-LAPSE | EXIT.   (Esc / q also quit.)
 """
 
 import argparse
@@ -76,8 +76,6 @@ class App:
                  ("record", "REC", "#3a3a3a", lambda: self.worker.send("record")),
                  ("timelapse", "TIME-LAPSE", "#3a3a3a",
                   lambda: self.worker.send("timelapse")),
-                 ("dataset", "DATASET", "#3a3a3a",
-                  lambda: self.worker.send("dataset")),
                  ("exit", "EXIT", "#3a3a3a", self.quit)]
         for i, (key, label, color, cmd) in enumerate(specs):
             b = tk.Button(bar, text=label, command=cmd, font=self.btn_font,

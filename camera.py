@@ -22,7 +22,6 @@ import json
 import math
 import os
 import queue
-import re
 import shutil
 import threading
 import time
@@ -77,8 +76,6 @@ class CameraWorker(threading.Thread):
         self.jpeg_q = int(cfg["photo_jpeg_quality"])
         self.low_mb = int(cfg["low_storage_mb"])
         self.tl_interval = max(1, int(cfg["timelapse_interval_sec"]))
-        self.dataset_root = os.path.expanduser(cfg.get("dataset_root", "~/datasets"))
-        self.dataset_min_conf = float(cfg.get("dataset_min_confidence", 0.5))
 
         self._model = model_entry            # current ModelEntry (may be None)
         self._desired_model = model_entry    # set by "switch" command
@@ -97,18 +94,8 @@ class CameraWorker(threading.Thread):
         self._next_tl = 0.0  # next time-lapse capture time (monotonic)
         self.photos = 0
         self.clips = 0
-        self.dataset_samples = 0
         self.low_storage = False
         self.free_mb = None
-
-        # Latest clean (un-annotated) frame + detections, stashed each loop so a
-        # "dataset" command can save the exact frame currently on screen.
-        self._last_clean = None
-        self._last_dets = []
-        self._last_labels = []
-        self._last_rotate = True
-        self._dataset = None  # CocoWriter for the current model (lazy)
-        self._dataset_model = None
 
         self._fps_val = 0.0
         self._toast = ""
@@ -133,7 +120,6 @@ class CameraWorker(threading.Thread):
                 "timelapse": self.timelapse,
                 "photos": self.photos,
                 "clips": self.clips,
-                "dataset_samples": self.dataset_samples,
                 "model": self._model.name if self._model else "(no model)",
                 "loading": self._loading,
             }
@@ -155,7 +141,6 @@ class CameraWorker(threading.Thread):
                 "timelapse": self.timelapse,
                 "photos": self.photos,
                 "clips": self.clips,
-                "dataset_samples": self.dataset_samples,
                 "low_storage": self.low_storage,
                 "free_mb": self.free_mb,
                 "toast": toast,
@@ -183,45 +168,6 @@ class CameraWorker(threading.Thread):
             self._toast_msg(f"Photo saved ({self.w}x{self.h})")
         else:
             self._toast_msg("PHOTO SAVE FAILED")
-
-    def _dataset_for(self, model, labels):
-        """Return a CocoWriter for ``model``, creating it on first use or when the
-        model changes. Each model gets its own dataset dir so class sets never
-        collide. Returns None if no model is loaded."""
-        from dataset import CocoWriter
-
-        if model is None:
-            return None
-        if self._dataset is not None and self._dataset_model == model.name:
-            return self._dataset
-
-        # Sanitise the display name into a folder name (drop a .tar.xz suffix).
-        safe = re.sub(r"\.tar\.xz$", "", model.name)
-        safe = re.sub(r"[^A-Za-z0-9._-]", "_", safe) or "model"
-        self._dataset = CocoWriter(
-            os.path.join(self.dataset_root, safe), labels,
-            rotate180=self._last_rotate, min_conf=self.dataset_min_conf,
-            jpeg_quality=self.jpeg_q)
-        self._dataset_model = model.name
-        return self._dataset
-
-    def _save_dataset_sample(self):
-        """Save the current clean frame + detections as one COCO sample."""
-        if self._model is None or self._last_clean is None:
-            self._toast_msg("Load a model to capture dataset")
-            return
-        if self.low_storage:
-            self._toast_msg("LOW STORAGE - not capturing")
-            return
-        try:
-            writer = self._dataset_for(self._model, self._last_labels)
-            boxes = writer.add_sample(self._last_clean, self._last_dets)
-            with self._lock:
-                self.dataset_samples += 1
-            self._toast_msg(f"Sample {writer.count} saved ({boxes} boxes)")
-        except Exception as exc:
-            print(f"[camera] dataset save failed: {exc}")
-            self._toast_msg("DATASET SAVE FAILED")
 
     def _handle_command(self, cmd, clean_frame):
         """Process one UI command. Returns True if the inner loop should break
@@ -253,8 +199,6 @@ class CameraWorker(threading.Thread):
                 self._next_tl = time.monotonic() + self.tl_interval
             self._toast_msg(f"Timelapse every {self.tl_interval}s"
                             if self.timelapse else "Timelapse off")
-        elif action == "dataset":
-            self._save_dataset_sample()
         elif action == "switch":
             self._desired_model = cmd[1]
             return True
@@ -394,13 +338,6 @@ class CameraWorker(threading.Thread):
                 if msg is not None:
                     current_detections = msg.detections
 
-            # Stash the clean (un-annotated) rotated frame for dataset capture
-            # before draw_detections paints boxes onto the letterboxed copy.
-            self._last_clean = raw
-            self._last_dets = current_detections
-            self._last_labels = labels
-            self._last_rotate = True
-
             draw_detections(frame, current_detections, labels, placement,
                             rotate180=True)
 
@@ -469,11 +406,6 @@ class CameraWorker(threading.Thread):
             cx = 0.3 + 0.2 * (1 + math.sin(t)) / 2
             dets = [_FakeDet(cx, 0.35, cx + 0.18, 0.7, 0, 0.92,
                              _FakeSC(200 * math.sin(t), -120, 1500 + 400 * math.cos(t)))]
-            # Stash the clean frame (no boxes, no rotation) for dataset capture.
-            self._last_clean = frame.copy()
-            self._last_dets = dets
-            self._last_labels = ["object"]
-            self._last_rotate = False
             draw_detections(frame, dets, ["object"], (0, 0, self.w, self.h))
 
             now = time.monotonic()

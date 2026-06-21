@@ -18,9 +18,5 @@
   "photo_jpeg_quality": 95,
   "timelapse_interval_sec": 30,
   "low_storage_mb": 500,
-  "note": "",
-
-  "_dataset_comment": "The DATASET button saves the current clean frame plus the model's detections as a COCO object-detection dataset. Each model gets its own folder under dataset_root (accumulates across runs). dataset_min_confidence is the lowest detection confidence that becomes an annotation; frames with no qualifying boxes still save as negative samples.",
-  "dataset_root": "~/datasets",
-  "dataset_min_confidence": 0.5
+  "note": ""
 }

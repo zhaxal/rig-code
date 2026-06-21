@@ -108,8 +108,8 @@ def draw_hud(frame, st):
     if st["timelapse"]:
         _text(frame, "TIMELAPSE ON", (w // 2 - 90, 26), _AMB, 0.6)
 
-    # Top-right: photo / clip / dataset-sample counts
-    cnt = f"Photos:{st['photos']}  Clips:{st['clips']}  Set:{st['dataset_samples']}"
+    # Top-right: photo / clip counts
+    cnt = f"Photos:{st['photos']}  Clips:{st['clips']}"
     (tw, _), _ = cv2.getTextSize(cnt, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
     _text(frame, cnt, (w - tw - 12, 26), _W, 0.55)
 
