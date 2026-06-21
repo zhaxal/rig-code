@@ -116,6 +116,12 @@ class CameraWorker(threading.Thread):
         self._lock = threading.Lock()
         self._loading = False  # pipeline (re)building
 
+        # Pipeline settings chosen per-connection from the negotiated USB speed
+        # (see _tune_for_usb). Default to the configured values; they are
+        # trimmed when the device comes up on a USB2 link so the streams fit.
+        self._build_fps = self.fps
+        self._extended_disparity = True
+
     # --- public API (called from the UI thread) ------------------------- #
 
     def send(self, *cmd):
@@ -260,6 +266,42 @@ class CameraWorker(threading.Thread):
             return True
         return False
 
+    # --- USB link adaptation -------------------------------------------- #
+
+    def _tune_for_usb(self, device):
+        """Read the *negotiated* USB link speed and pick pipeline settings that
+        fit it.
+
+        The OAK-D negotiates USB3 (SuperSpeed) or USB2 (HighSpeed) at plug-in,
+        and that handshake is flaky in practice (cable, port, hub, timing) — so
+        the same rig "sometimes works, sometimes not". On USB2 the RGB + two
+        mono streams (plus the NN feed) overrun the ~480 Mbps bus and the
+        pipeline stalls / throws a communication exception. Rather than leave it
+        to luck, detect USB2 and trim FPS + extended disparity so the streams
+        fit and the camera runs reliably instead of intermittently dead.
+        """
+        self._build_fps = self.fps
+        self._extended_disparity = True
+        try:
+            speed = device.getUsbSpeed()
+        except Exception as exc:
+            print(f"[camera] could not read USB speed ({exc}); "
+                  f"using configured {self._build_fps} fps")
+            return
+
+        if "SUPER" in str(speed).upper():  # SUPER / SUPER_PLUS == USB3
+            print(f"[camera] USB link: {speed} -> full pipeline "
+                  f"@ {self._build_fps} fps")
+        else:
+            # Three sensor streams at the full rate overrun HighSpeed; cap to a
+            # USB2-safe rate and drop extended disparity (which roughly doubles
+            # the stereo payload) so the rig stays usable.
+            self._build_fps = min(self.fps, 10)
+            self._extended_disparity = False
+            print(f"[camera] USB link: {speed} (USB2) -> reduced pipeline "
+                  f"@ {self._build_fps} fps, extended disparity off")
+            self._toast_msg("USB2 link - reduced FPS", 3.0)
+
     # --- pipeline build (real hardware) --------------------------------- #
 
     def _build_pipeline(self, pipeline):
@@ -276,19 +318,23 @@ class CameraWorker(threading.Thread):
         # Sensor FPS is set once, at build time, on each Camera node (the v3 way).
         # Three streams at 30 fps overrun USB bandwidth -> "communication
         # exception" / stalls; the official example runs the stereo path at 20.
+        # _build_fps / _extended_disparity are chosen per-connection from the
+        # negotiated USB speed (see _tune_for_usb) so a USB2 link gets a lighter
+        # pipeline instead of stalling.
+        fps = self._build_fps
         cam = pipeline.create(dai.node.Camera).build(
-            dai.CameraBoardSocket.CAM_A, sensorFps=self.fps)
+            dai.CameraBoardSocket.CAM_A, sensorFps=fps)
 
         spatial_q = None
         label_map = []
         entry = self._model
         if entry is not None:
             mono_left = pipeline.create(dai.node.Camera).build(
-                dai.CameraBoardSocket.CAM_B, sensorFps=self.fps)
+                dai.CameraBoardSocket.CAM_B, sensorFps=fps)
             mono_right = pipeline.create(dai.node.Camera).build(
-                dai.CameraBoardSocket.CAM_C, sensorFps=self.fps)
+                dai.CameraBoardSocket.CAM_C, sensorFps=fps)
             stereo = pipeline.create(dai.node.StereoDepth)
-            stereo.setExtendedDisparity(True)
+            stereo.setExtendedDisparity(self._extended_disparity)
             mono_left.requestOutput((640, 400)).link(stereo.left)
             mono_right.requestOutput((640, 400)).link(stereo.right)
 
@@ -321,7 +367,7 @@ class CameraWorker(threading.Thread):
             rh = max(1, round(self.w * 9 / 16))
             preview_q = cam.requestOutput((rw, rh),
                                           dai.ImgFrame.Type.BGR888p).createOutputQueue()
-            print(f"[camera] preview OK ({rw}x{rh}@{self.fps})")
+            print(f"[camera] preview OK ({rw}x{rh}@{fps})")
 
         return preview_q, spatial_q, label_map
 
@@ -338,13 +384,18 @@ class CameraWorker(threading.Thread):
                 with self._lock:
                     self._model = self._desired_model
                     self._loading = True
-                with dai.Pipeline() as pipeline:
-                    pq, sq, labels = self._build_pipeline(pipeline)
-                    pipeline.start()
-                    with self._lock:
-                        self._loading = False
-                    self._toast_msg("Camera ready")
-                    self._loop(pipeline, pq, sq, labels)
+                # Open the device explicitly so we can read the negotiated USB
+                # link speed and adapt the pipeline to it before building. The
+                # pipeline is bound to this exact device.
+                with dai.Device() as device:
+                    self._tune_for_usb(device)
+                    with dai.Pipeline(device) as pipeline:
+                        pq, sq, labels = self._build_pipeline(pipeline)
+                        pipeline.start()
+                        with self._lock:
+                            self._loading = False
+                        self._toast_msg("Camera ready")
+                        self._loop(pipeline, pq, sq, labels)
             except Exception as exc:
                 print(f"[camera] error: {exc}")
                 if self.rec.active:

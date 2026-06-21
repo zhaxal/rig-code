@@ -141,6 +141,14 @@ systemctl --user enable --now spatial-detector.service
 
 - **Black screen / camera error on startup** — check the USB3 cable/port and the
   udev rule; the worker retries and reconnects automatically.
+- **Works sometimes, fails other times (intermittent)** — the OAK-D negotiates
+  USB3 (SuperSpeed) or USB2 (HighSpeed) at each plug-in, and a flaky cable/port
+  can land on USB2, where three camera streams overrun the bus and stall. The
+  worker now reads the negotiated link speed on connect and, on USB2,
+  automatically reduces FPS and disables extended disparity so it still runs
+  (watch the console for `USB link: ... (USB2) -> reduced pipeline`). For full
+  frame rate, use a USB3 (blue) port and a data-capable USB3 cable; run
+  `python3 diag_camera.py` to see the negotiated speed.
 - **Model won't load** — confirm the file in `models/` is a valid RVC2 NNArchive,
   or that the zoo ID is correct and the Pi has internet to download it.
 - **Pipeline won't start** — lower `capture_fps` or `screen_size` in `config.json`
