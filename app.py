@@ -39,6 +39,7 @@ class App:
 
         self.entries = discover_models()
         current = pick_default(self.entries, cfg.get("default_model", ""))
+        self._current_entry = current  # tracks the loaded model for picker highlight
 
         # The worker renders frames sized to the video area (above the bar).
         worker_cfg = dict(cfg)
@@ -103,21 +104,40 @@ class App:
         tk.Label(top, text="SELECT MODEL", font=big, fg="white",
                  bg="black").pack(pady=(16, 8))
 
-        list_frame = tk.Frame(top, bg="black")
-        list_frame.pack(fill="both", expand=True, padx=20)
+        # Scrollable list — wide scrollbar so it's touchable
+        outer = tk.Frame(top, bg="black")
+        outer.pack(fill="both", expand=True, padx=20, pady=(0, 4))
+
+        canvas = tk.Canvas(outer, bg="black", highlightthickness=0)
+        sb = tk.Scrollbar(outer, orient="vertical", command=canvas.yview, width=36)
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        inner = tk.Frame(canvas, bg="black")
+        win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>",
+                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfig(win_id, width=e.width))
+
         for entry in self.entries:
-            tk.Button(list_frame, text=entry.name, font=big,
-                      fg="white", bg="#2a2a2a", activebackground="#4a7",
+            is_current = (self._current_entry is not None
+                          and entry.ref == self._current_entry.ref)
+            bg = "#2e6640" if is_current else "#2a2a2a"
+            tk.Button(inner, text=entry.name, font=big,
+                      fg="white", bg=bg, activebackground="#3d8050",
                       bd=0, relief="flat", anchor="w", padx=20,
                       command=lambda e=entry, t=top: self._choose(e, t)
                       ).pack(fill="x", pady=4, ipady=14)
 
         tk.Button(top, text="CANCEL", font=big, fg="white", bg="#622",
                   activebackground="#933", bd=0, relief="flat",
-                  command=top.destroy).pack(fill="x", padx=20, pady=16, ipady=12)
+                  command=top.destroy).pack(fill="x", padx=20, pady=12, ipady=12)
 
     def _choose(self, entry, top):
         top.destroy()
+        self._current_entry = entry
         self.worker.send("switch", entry)
 
     # --- render loop ---------------------------------------------------- #
