@@ -91,6 +91,8 @@ class App:
 
     # --- model picker modal --------------------------------------------- #
 
+    _PICKER_PAGE_SIZE = 4
+
     def open_picker(self):
         if not self.entries:
             return
@@ -101,39 +103,62 @@ class App:
         top.grab_set()
 
         big = tkfont.Font(family="DejaVu Sans", size=16, weight="bold")
-        tk.Label(top, text="SELECT MODEL", font=big, fg="white",
-                 bg="black").pack(pady=(16, 8))
+        page_size = self._PICKER_PAGE_SIZE
+        page = [0]  # mutable so inner functions can update it
 
-        # Scrollable list — wide scrollbar so it's touchable
-        outer = tk.Frame(top, bg="black")
-        outer.pack(fill="both", expand=True, padx=20, pady=(0, 4))
+        title = tk.Label(top, font=big, fg="white", bg="black")
+        title.pack(pady=(16, 8))
 
-        canvas = tk.Canvas(outer, bg="black", highlightthickness=0)
-        sb = tk.Scrollbar(outer, orient="vertical", command=canvas.yview, width=36)
-        canvas.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
+        list_frame = tk.Frame(top, bg="black")
+        list_frame.pack(fill="both", expand=True, padx=20)
 
-        inner = tk.Frame(canvas, bg="black")
-        win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
-        inner.bind("<Configure>",
-                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>",
-                    lambda e: canvas.itemconfig(win_id, width=e.width))
+        nav = tk.Frame(top, bg="black")
+        nav.pack(fill="x", padx=20, pady=(4, 0))
 
-        for entry in self.entries:
-            is_current = (self._current_entry is not None
-                          and entry.ref == self._current_entry.ref)
-            bg = "#2e6640" if is_current else "#2a2a2a"
-            tk.Button(inner, text=entry.name, font=big,
-                      fg="white", bg=bg, activebackground="#3d8050",
-                      bd=0, relief="flat", anchor="w", padx=20,
-                      command=lambda e=entry, t=top: self._choose(e, t)
-                      ).pack(fill="x", pady=4, ipady=14)
+        btn_prev = tk.Button(nav, text="< PREV", font=big, fg="white",
+                             bg="#3a3a3a", activebackground="#555",
+                             bd=0, relief="flat")
+        btn_prev.pack(side="left", fill="x", expand=True, ipady=10, padx=(0, 4))
+
+        btn_next = tk.Button(nav, text="NEXT >", font=big, fg="white",
+                             bg="#3a3a3a", activebackground="#555",
+                             bd=0, relief="flat")
+        btn_next.pack(side="left", fill="x", expand=True, ipady=10, padx=(4, 0))
 
         tk.Button(top, text="CANCEL", font=big, fg="white", bg="#622",
                   activebackground="#933", bd=0, relief="flat",
                   command=top.destroy).pack(fill="x", padx=20, pady=12, ipady=12)
+
+        def render_page():
+            for w in list_frame.winfo_children():
+                w.destroy()
+            p = page[0]
+            total_pages = max(1, -(-len(self.entries) // page_size))
+            title.config(text=f"SELECT MODEL  ({p + 1}/{total_pages})")
+            for entry in self.entries[p * page_size:(p + 1) * page_size]:
+                is_current = (self._current_entry is not None
+                              and entry.ref == self._current_entry.ref)
+                bg = "#2e6640" if is_current else "#2a2a2a"
+                tk.Button(list_frame, text=entry.name, font=big,
+                          fg="white", bg=bg, activebackground="#3d8050",
+                          bd=0, relief="flat", anchor="w", padx=20,
+                          command=lambda e=entry, t=top: self._choose(e, t)
+                          ).pack(fill="x", pady=4, ipady=14)
+            btn_prev.config(state="normal" if p > 0 else "disabled",
+                            bg="#3a3a3a" if p > 0 else "#222")
+            btn_next.config(state="normal" if p < total_pages - 1 else "disabled",
+                            bg="#3a3a3a" if p < total_pages - 1 else "#222")
+
+        btn_prev.config(command=lambda: (page.__setitem__(0, page[0] - 1), render_page()))
+        btn_next.config(command=lambda: (page.__setitem__(0, page[0] + 1), render_page()))
+
+        # Open on the page that contains the current model
+        if self._current_entry:
+            for i, e in enumerate(self.entries):
+                if e.ref == self._current_entry.ref:
+                    page[0] = i // page_size
+                    break
+        render_page()
 
     def _choose(self, entry, top):
         top.destroy()
