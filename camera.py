@@ -348,7 +348,7 @@ class CameraWorker(threading.Thread):
                 model_desc = dai.NNArchive(entry.ref)
             else:
                 nn_desc = dai.NNModelDescription()
-                nn_desc.model.modelSlug = entry.ref
+                nn_desc.model = entry.ref
                 if self._platform:
                     nn_desc.platform = self._platform
                 model_desc = nn_desc
