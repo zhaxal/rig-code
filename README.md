@@ -68,7 +68,21 @@ list their IDs under `zoo_models` in `config.json`:
 Set `default_model` to the display name (a filename or a zoo ID) you want loaded
 at startup; leave it empty to use the first discovered model.
 
-A sample model, `models/exp.rvc2.tar.xz`, is included.
+Sample models (tomato ripeness detection, RVC2) are included under `models/`.
+
+### Models missing after `git clone` / `git pull`?
+
+The model files are versioned in this repo, so a clean clone/pull brings them
+down automatically. But they are large binaries (the bigger one is ~18 MB), and
+a flaky connection (Wi-Fi on a Pi is the usual offender) can drop them, leaving
+`models/` empty or partial. To re-fetch them without re-cloning:
+
+```bash
+./download_models.sh
+```
+
+It downloads any missing model files straight from GitHub, with retries, and
+skips files that are already complete. `setup.sh` runs it for you.
 
 ## Configuration
 

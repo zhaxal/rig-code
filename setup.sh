@@ -29,6 +29,11 @@ pip install --upgrade pip
 pip uninstall -y opencv-python opencv-python-headless 2>/dev/null || true
 pip install -r requirements.txt
 
+echo "==> Ensuring model files are present..."
+# The models are committed to the repo, but a flaky clone/pull can drop the
+# large binaries. This re-fetches any that are missing (idempotent).
+./download_models.sh || echo "WARNING: model download failed; run ./download_models.sh later."
+
 echo ""
 echo "Done. Run the app with:"
 echo "  source venv/bin/activate && python3 app.py"
