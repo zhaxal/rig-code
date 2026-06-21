@@ -30,7 +30,7 @@ from datetime import datetime
 import cv2
 import numpy as np
 
-from overlay import draw_detections, draw_hud
+from overlay import draw_detections, draw_hud, letterbox
 from recorder import Recorder, stamp
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -258,9 +258,14 @@ class CameraWorker(threading.Thread):
             print(f"[camera] spatial detection OK "
                   f"({entry.name}, {len(label_map)} classes)")
         else:
-            preview_q = cam.requestOutput((self.w, self.h),
+            # Request a 16:9 frame (the OAK-D's native RGB aspect) rather than
+            # the video area's aspect, so the ISP doesn't pre-stretch it; the
+            # loop letterboxes it to the video area undistorted.
+            rw = self.w
+            rh = max(1, round(self.w * 9 / 16))
+            preview_q = cam.requestOutput((rw, rh),
                                           dai.ImgFrame.Type.BGR888p).createOutputQueue()
-            print(f"[camera] preview OK ({self.w}x{self.h}@{self.fps})")
+            print(f"[camera] preview OK ({rw}x{rh}@{self.fps})")
 
         return preview_q, spatial_q, label_map
 
@@ -319,17 +324,22 @@ class CameraWorker(threading.Thread):
                 time.sleep(0.005)
                 continue
             last_frame = time.monotonic()
-            frame = frame_msg.getCvFrame()
-            frame = cv2.rotate(frame, cv2.ROTATE_180)
-            if frame.shape[1] != self.w or frame.shape[0] != self.h:
-                frame = cv2.resize(frame, (self.w, self.h))
+            # Camera is mounted upside-down, so rotate the pixels for display.
+            # Detection coords stay in the un-rotated frame's space; the overlay
+            # mirrors them (rotate180=True) to keep boxes on their objects.
+            raw = cv2.rotate(frame_msg.getCvFrame(), cv2.ROTATE_180)
+            # Letterbox into the video area instead of stretching: the NN
+            # passthrough is usually square and the video area is not, so a plain
+            # resize distorted the image and pulled boxes off their targets.
+            frame, placement = letterbox(raw, self.w, self.h)
 
             if sq is not None:
                 msg = sq.tryGet()
                 if msg is not None:
                     current_detections = msg.detections
 
-            draw_detections(frame, current_detections, labels, self.w, self.h)
+            draw_detections(frame, current_detections, labels, placement,
+                            rotate180=True)
 
             now = time.monotonic()
             dt = now - last
@@ -396,7 +406,7 @@ class CameraWorker(threading.Thread):
             cx = 0.3 + 0.2 * (1 + math.sin(t)) / 2
             dets = [_FakeDet(cx, 0.35, cx + 0.18, 0.7, 0, 0.92,
                              _FakeSC(200 * math.sin(t), -120, 1500 + 400 * math.cos(t)))]
-            draw_detections(frame, dets, ["object"], self.w, self.h)
+            draw_detections(frame, dets, ["object"], (0, 0, self.w, self.h))
 
             now = time.monotonic()
             with self._lock:
