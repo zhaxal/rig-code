@@ -35,6 +35,10 @@ DEFAULTS = {
     "timelapse_interval_sec": 30,
     "low_storage_mb": 500,       # warn / block captures below this free space
     "note": "",                  # free-text note copied into session_meta.json
+
+    # --- COCO dataset capture -------------------------------------------
+    "dataset_root": "~/datasets",     # per-model COCO datasets accumulate here
+    "dataset_min_confidence": 0.5,    # min detection confidence to annotate
 }
 
 
