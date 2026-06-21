@@ -74,8 +74,12 @@ def draw_detections(frame, detections, labels, placement, rotate180=False):
 
         try:
             sc = det.spatialCoordinates
-            coord_text = (f"X:{sc.x / 1000.0:+.2f} "
-                          f"Y:{sc.y / 1000.0:+.2f} "
+            # X/Y are measured in the (upside-down) sensor frame; the 180°
+            # rotation flips their sign relative to the upright display. Z is
+            # distance along the optical axis and is unaffected by the rotation.
+            sx, sy = (-sc.x, -sc.y) if rotate180 else (sc.x, sc.y)
+            coord_text = (f"X:{sx / 1000.0:+.2f} "
+                          f"Y:{sy / 1000.0:+.2f} "
                           f"Z:{sc.z / 1000.0:.2f}m")
         except AttributeError:
             coord_text = None
