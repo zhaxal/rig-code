@@ -6,9 +6,8 @@
   "fullscreen": true,
   "capture_fps": 20,
 
-  "_model_comment": "default_model is a display name shown in the GUI picker (e.g. a filename from models/ or a zoo id). Empty = first discovered model. zoo_models are extra Luxonis model-zoo ids offered alongside local NNArchives. bb_scale/depth thresholds tune spatial coordinate sampling.",
+  "_model_comment": "default_model is a display name shown in the GUI picker (e.g. a filename from models/). Empty = first discovered model. bb_scale/depth thresholds tune spatial coordinate sampling.",
   "default_model": "",
-  "zoo_models": ["yolov6-nano", "mobilenet-ssd"],
   "bb_scale": 0.5,
   "depth_lower_mm": 100,
   "depth_upper_mm": 5000,

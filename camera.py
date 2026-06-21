@@ -121,7 +121,6 @@ class CameraWorker(threading.Thread):
         # trimmed when the device comes up on a USB2 link so the streams fit.
         self._build_fps = self.fps
         self._extended_disparity = True
-        self._platform = None  # set by _tune_for_usb from the live device
 
     # --- public API (called from the UI thread) ------------------------- #
 
@@ -284,11 +283,6 @@ class CameraWorker(threading.Thread):
         self._build_fps = self.fps
         self._extended_disparity = True
         try:
-            self._platform = device.getPlatformAsString()
-            print(f"[camera] device platform: {self._platform}")
-        except Exception as exc:
-            print(f"[camera] could not read device platform ({exc})")
-        try:
             speed = device.getUsbSpeed()
         except Exception as exc:
             print(f"[camera] could not read USB speed ({exc}); "
@@ -344,14 +338,7 @@ class CameraWorker(threading.Thread):
             mono_left.requestOutput((640, 400)).link(stereo.left)
             mono_right.requestOutput((640, 400)).link(stereo.right)
 
-            if entry.kind == "archive":
-                model_desc = dai.NNArchive(entry.ref)
-            else:
-                nn_desc = dai.NNModelDescription()
-                nn_desc.model = entry.ref
-                if self._platform:
-                    nn_desc.platform = self._platform
-                model_desc = nn_desc
+            model_desc = dai.NNArchive(entry.ref)
 
             # v3 SpatialDetectionNetwork.build wires depth itself: (rgb, stereo, model).
             spatial_net = (pipeline.create(dai.node.SpatialDetectionNetwork)

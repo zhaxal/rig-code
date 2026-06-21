@@ -37,7 +37,7 @@ class App:
         self.W, self.H = cfg["screen_size"]
         self.video_h = self.H - BAR_H
 
-        self.entries = discover_models(cfg.get("zoo_models", []))
+        self.entries = discover_models()
         current = pick_default(self.entries, cfg.get("default_model", ""))
 
         # The worker renders frames sized to the video area (above the bar).
@@ -106,8 +106,7 @@ class App:
         list_frame = tk.Frame(top, bg="black")
         list_frame.pack(fill="both", expand=True, padx=20)
         for entry in self.entries:
-            kind = "zoo" if entry.kind == "zoo" else "local"
-            tk.Button(list_frame, text=f"{entry.name}   [{kind}]", font=big,
+            tk.Button(list_frame, text=entry.name, font=big,
                       fg="white", bg="#2a2a2a", activebackground="#4a7",
                       bd=0, relief="flat", anchor="w", padx=20,
                       command=lambda e=entry, t=top: self._choose(e, t)
