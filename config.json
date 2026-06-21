@@ -4,7 +4,7 @@
   "_display_comment": "screen_size is your touchscreen panel resolution [w, h]. fullscreen hides the cursor and fills the screen. capture_fps is the sensor FPS shared by all OAK cameras; the official v3 stereo example uses 20. Going to 30 on three streams can overrun USB bandwidth (communication exception / stalls).",
   "screen_size": [800, 480],
   "fullscreen": true,
-  "capture_fps": 15,
+  "capture_fps": 20,
 
   "_model_comment": "default_model is a display name shown in the GUI picker (e.g. a filename from models/ or a zoo id). Empty = first discovered model. zoo_models are extra Luxonis model-zoo ids offered alongside local NNArchives. bb_scale/depth thresholds tune spatial coordinate sampling.",
   "default_model": "",
