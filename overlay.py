@@ -8,6 +8,7 @@ tkinter Canvas, so the recorded video matches the live preview.
 import time
 
 import cv2
+import numpy as np
 
 # BGR colours
 _W = (255, 255, 255)
@@ -23,13 +24,46 @@ def _text(frame, s, org, color, scale):
     cv2.putText(frame, s, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, 2, cv2.LINE_AA)
 
 
-def draw_detections(frame, detections, labels, w, h):
-    """Draw each detection's bounding box, label, confidence and spatial X/Y/Z."""
+def letterbox(frame, w, h):
+    """Fit ``frame`` into a ``w``×``h`` canvas preserving its aspect ratio.
+
+    Returns ``(canvas, placement)`` where ``placement`` is ``(ox, oy, sw, sh)``:
+    the pixel rectangle the (scaled) frame occupies, centred with black bars
+    filling the remainder. Detection coordinates are normalised to the original
+    frame, so mapping them through ``placement`` keeps boxes aligned instead of
+    stretching the image to fill a mismatched aspect ratio.
+    """
+    fh, fw = frame.shape[:2]
+    if fw == 0 or fh == 0:
+        return frame, (0, 0, w, h)
+    scale = min(w / fw, h / fh)
+    sw, sh = max(1, int(round(fw * scale))), max(1, int(round(fh * scale)))
+    resized = cv2.resize(frame, (sw, sh))
+    ox, oy = (w - sw) // 2, (h - sh) // 2
+    canvas = np.zeros((h, w, 3), dtype=frame.dtype)
+    canvas[oy:oy + sh, ox:ox + sw] = resized
+    return canvas, (ox, oy, sw, sh)
+
+
+def draw_detections(frame, detections, labels, placement, rotate180=False):
+    """Draw each detection's bounding box, label, confidence and spatial X/Y/Z.
+
+    ``placement`` is ``(ox, oy, sw, sh)`` — the pixel rectangle the source image
+    occupies in ``frame`` (see :func:`letterbox`). Detection coordinates are
+    normalised to that source image, so they are mapped into the rectangle here.
+    ``rotate180`` mirrors the coordinates to match a frame that was rotated 180°
+    for display (camera mounted upside-down), keeping boxes on their objects.
+    """
+    ox, oy, sw, sh = placement
     for det in detections:
-        x1 = int(det.xmin * w)
-        y1 = int(det.ymin * h)
-        x2 = int(det.xmax * w)
-        y2 = int(det.ymax * h)
+        x1n, y1n, x2n, y2n = det.xmin, det.ymin, det.xmax, det.ymax
+        if rotate180:
+            x1n, x2n = 1.0 - x2n, 1.0 - x1n
+            y1n, y2n = 1.0 - y2n, 1.0 - y1n
+        x1 = int(ox + x1n * sw)
+        y1 = int(oy + y1n * sh)
+        x2 = int(ox + x2n * sw)
+        y2 = int(oy + y2n * sh)
         if x1 >= x2 or y1 >= y2:
             continue
 
